@@ -44,8 +44,7 @@ class IosSubscriptionHelper {
 
   static bool shouldProcessPurchaseUpdate(PurchaseIOS item) {
     final String productId = normalizedProductId(item);
-    return (item.purchaseState == PurchaseState.Purchased ||
-            item.purchaseState == PurchaseState.Restored) &&
+    return item.purchaseState == PurchaseState.Purchased &&
         productId.isNotEmpty;
   }
 
@@ -54,7 +53,7 @@ class IosSubscriptionHelper {
       return false;
     }
 
-    if (item.purchaseState == PurchaseState.Failed) {
+    if (item.purchaseState != PurchaseState.Purchased) {
       return false;
     }
 
@@ -77,11 +76,10 @@ class IosSubscriptionHelper {
     void Function(String message)? logger,
   }) async {
     try {
-      final Map<dynamic, dynamic>? rawResult =
-          await channel.invokeMethod<Map<dynamic, dynamic>>(
-        'validateReceiptIOS',
-        {'sku': productId},
-      );
+      final Map<dynamic, dynamic>? rawResult = await channel
+          .invokeMethod<Map<dynamic, dynamic>>('validateReceiptIOS', {
+            'apple': {'sku': productId},
+          });
       if (rawResult == null) {
         return null;
       }
@@ -124,11 +122,13 @@ class IosSubscriptionHelper {
       tx['__typename'] ??= 'PurchaseIOS';
       tx['productId'] ??= productId;
       tx['platform'] ??= fallbackItem?.platform.toJson() ?? 'ios';
-      tx['purchaseState'] ??= fallbackItem?.purchaseState.toJson() ??
+      tx['purchaseState'] ??=
+          fallbackItem?.purchaseState.toJson() ??
           PurchaseState.Purchased.toJson();
       tx['isAutoRenewing'] ??= fallbackItem?.isAutoRenewing ?? false;
       tx['quantity'] ??= fallbackItem?.quantity ?? 1;
-      tx['transactionDate'] ??= fallbackItem?.transactionDate ??
+      tx['transactionDate'] ??=
+          fallbackItem?.transactionDate ??
           DateTime.now().millisecondsSinceEpoch;
 
       final String transactionId =
@@ -152,7 +152,8 @@ class IosSubscriptionHelper {
       return PurchaseIOS.fromJson(tx);
     } catch (e) {
       logger?.call(
-          'Parse latest iOS transaction failed: $e | raw=$rawTransaction');
+        'Parse latest iOS transaction failed: $e | raw=$rawTransaction',
+      );
       return fallbackItem;
     }
   }
@@ -172,14 +173,11 @@ class IosSubscriptionHelper {
           );
           return;
         }
-        await channel.invokeMethod(
-          'finishTransaction',
-          <String, dynamic>{
-            'transactionId': transactionId,
-            'purchase': item.toJson(),
-            'isConsumable': false,
-          },
-        );
+        await channel.invokeMethod('finishTransaction', <String, dynamic>{
+          'transactionId': transactionId,
+          'purchase': item.toJson(),
+          'isConsumable': false,
+        });
         return;
       }
 
@@ -195,9 +193,11 @@ class IosSubscriptionHelper {
     required List<String> subscriptionProductIds,
     void Function(String message)? logger,
   }) async {
-    final bool productHasFreeTrial = products.any((product) =>
-        product.subscriptionInfoIOS?.introductoryOffer?.paymentMode ==
-        PaymentModeIOS.FreeTrial);
+    final bool productHasFreeTrial = products.any(
+      (product) =>
+          product.subscriptionInfoIOS?.introductoryOffer?.paymentMode ==
+          PaymentModeIOS.FreeTrial,
+    );
 
     String? groupId;
     for (final product in products) {
