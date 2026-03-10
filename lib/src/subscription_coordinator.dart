@@ -329,9 +329,8 @@ class SubscriptionCoordinator {
       final List<Purchase> items = await _iap.getAvailablePurchases();
       if (items.isEmpty) {
         final SubscriptionActionResult result =
-            SubscriptionActionResult.failure(
+            SubscriptionActionResult.success(
           type: SubscriptionActionType.restore,
-          code: 'no-purchases',
           message: 'No restorable purchases were found.',
         );
         _notifyFinished(source, result);
