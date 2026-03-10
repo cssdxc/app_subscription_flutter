@@ -440,7 +440,22 @@ class SubscriptionCoordinator {
       fallbackItem: item,
       logger: _log,
     );
-    if (validationResult == null || !validationResult.isValid) {
+    if (validationResult == null) {
+      final bool fallbackActive = IosSubscriptionHelper.isPurchaseActive(item);
+      _log(
+        'Local validation unavailable for $productId, fallback to transaction fields: active=$fallbackActive, tx=${item?.transactionIdFor}',
+      );
+      await _reportTransaction(item);
+      await _updateSubscriptionExpiration(
+        fallbackActive ? item?.expirationDateIOS?.toInt() ?? 0 : 0,
+      );
+      return SubscriptionVerificationResult(
+        isActive: fallbackActive,
+        resolvedItem: item,
+      );
+    }
+
+    if (!validationResult.isValid) {
       await _updateSubscriptionExpiration(0);
       return const SubscriptionVerificationResult(isActive: false);
     }
