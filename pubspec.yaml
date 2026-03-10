@@ -1,0 +1,16 @@
+name: app_subscription_core
+description: Shared subscription primitives for Flutter apps using flutter_inapp_purchase.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.1.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_inapp_purchase: ^7.1.14
+  shared_preferences: ^2.5.3
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
