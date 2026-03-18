@@ -289,6 +289,19 @@ class SubscriptionCoordinator {
       final SubscriptionActionResult result = await completer.future;
       _notifyFinished(source, result);
       return result;
+    } on PurchaseError catch (e) {
+      _log('发起购买返回错误: code=${e.code?.value ?? ''}, message=${e.message}');
+      _isBuying = false;
+      _pendingPurchaseAction = null;
+      final SubscriptionActionResult result = SubscriptionActionResult.failure(
+        type: SubscriptionActionType.purchase,
+        productId: product.id,
+        code: e.code?.value ?? 'request-failed',
+        message: e.message,
+        cancelled: e.code == ErrorCode.UserCancelled,
+      );
+      _notifyFinished(source, result);
+      return result;
     } catch (e) {
       _log('发起购买异常: $e');
       _isBuying = false;
