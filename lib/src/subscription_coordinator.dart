@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
-import 'package:flutter_inapp_purchase/helpers.dart' as fip_helpers;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ios_subscription_helper.dart';
@@ -113,7 +112,7 @@ class SubscriptionCoordinator {
   final Completer<void> _readyCompleter = Completer<void>();
 
   StreamSubscription<Purchase?>? _purchaseUpdatedSubscription;
-  StreamSubscription<fip_helpers.PurchaseResult?>? _purchaseErrorSubscription;
+  StreamSubscription<PurchaseError>? _purchaseErrorSubscription;
 
   _PendingPurchaseAction? _pendingPurchaseAction;
   bool _isProcessingPurchase = false;
@@ -169,8 +168,9 @@ class SubscriptionCoordinator {
       });
 
       _purchaseErrorSubscription =
-          _iap.purchaseError.listen((fip_helpers.PurchaseResult? event) {
-        _log('购买错误: code=${event?.code}, message=${event?.message}');
+          _iap.purchaseErrorListener.listen((PurchaseError event) {
+        final String errorCode = event.code?.value ?? '';
+        _log('购买错误: code=$errorCode, message=${event.message}');
         _isBuying = false;
         final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
         if (pendingAction != null && !pendingAction.completer.isCompleted) {
@@ -178,9 +178,9 @@ class SubscriptionCoordinator {
               SubscriptionActionResult.failure(
             type: SubscriptionActionType.purchase,
             productId: pendingAction.productId,
-            code: event?.code,
-            message: event?.message,
-            cancelled: event?.code == ErrorCode.UserCancelled.value,
+            code: errorCode,
+            message: event.message,
+            cancelled: event.code == ErrorCode.UserCancelled,
           );
           pendingAction.completer.complete(result);
           _notifyFinished(pendingAction.source, result);
