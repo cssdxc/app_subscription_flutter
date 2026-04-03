@@ -41,6 +41,7 @@ class SubscriptionActionEvent {
     required this.phase,
     required this.type,
     required this.source,
+    this.silent = false,
     this.productId,
     this.result,
   });
@@ -48,6 +49,7 @@ class SubscriptionActionEvent {
   final SubscriptionActionPhase phase;
   final SubscriptionActionType type;
   final String source;
+  final bool silent;
   final String? productId;
   final SubscriptionActionResult? result;
 }
@@ -188,7 +190,7 @@ class SubscriptionCoordinator {
         _pendingPurchaseAction = null;
       });
 
-      await restore(source: 'bootstrap');
+      await restore(source: 'bootstrap', silent: true);
       await loadProducts();
     } finally {
       if (!_readyCompleter.isCompleted) {
@@ -319,19 +321,25 @@ class SubscriptionCoordinator {
 
   Future<SubscriptionActionResult> restore({
     String source = 'manual_restore',
+    bool silent = false,
   }) async {
     if (_hasInFlightOperation) {
       _log('正在处理其他操作，请勿重复恢复');
       final SubscriptionActionResult result = SubscriptionActionResult.failure(
         type: SubscriptionActionType.restore,
+        silent: silent,
         code: 'busy',
         message: 'Another purchase flow is already in progress.',
       );
-      _notifyFinished(source, result);
+      _notifyFinished(source, result, silent: silent);
       return result;
     }
 
-    _notifyStarted(type: SubscriptionActionType.restore, source: source);
+    _notifyStarted(
+      type: SubscriptionActionType.restore,
+      source: source,
+      silent: silent,
+    );
     _log('开始恢复购买');
 
     try {
@@ -344,9 +352,10 @@ class SubscriptionCoordinator {
         final SubscriptionActionResult result =
             SubscriptionActionResult.success(
           type: SubscriptionActionType.restore,
+          silent: silent,
           message: 'No restorable purchases were found.',
         );
-        _notifyFinished(source, result);
+        _notifyFinished(source, result, silent: silent);
         return result;
       }
 
@@ -360,6 +369,7 @@ class SubscriptionCoordinator {
           item,
           actionType: SubscriptionActionType.restore,
           source: source,
+          silent: silent,
         );
         if (result.success) {
           restoredCount++;
@@ -371,32 +381,41 @@ class SubscriptionCoordinator {
       final SubscriptionActionResult finalResult = restoredCount == 0
           ? SubscriptionActionResult.failure(
               type: SubscriptionActionType.restore,
+              silent: silent,
               code: 'restore-inactive',
               message:
                   'Restorable purchases were found, but none are currently active.',
             )
           : SubscriptionActionResult.success(
               type: SubscriptionActionType.restore,
+              silent: silent,
               productId: IosSubscriptionHelper.normalizedProductId(
                   latestSuccessPurchase),
               purchase: latestSuccessPurchase,
               restoredCount: restoredCount,
             );
-      _notifyFinished(source, finalResult);
+      _notifyFinished(source, finalResult, silent: silent);
       return finalResult;
     } catch (e) {
       _log('恢复购买异常: $e');
       final SubscriptionActionResult result = SubscriptionActionResult.failure(
         type: SubscriptionActionType.restore,
+        silent: silent,
         code: 'restore-exception',
         message: e.toString(),
       );
-      _notifyFinished(source, result);
+      _notifyFinished(source, result, silent: silent);
       return result;
     } finally {
       _isRestoring = false;
       _isBuying = false;
     }
+  }
+
+  Future<SubscriptionActionResult> restoreSilently({
+    String source = 'silent_restore',
+  }) {
+    return restore(source: source, silent: true);
   }
 
   String findPrice(String productId, String fallbackPrice) {
@@ -493,11 +512,13 @@ class SubscriptionCoordinator {
     PurchaseIOS item, {
     required SubscriptionActionType actionType,
     required String source,
+    bool silent = false,
   }) async {
     if (!IosSubscriptionHelper.shouldProcessPurchaseUpdate(item)) {
       _log('忽略不需要处理的购买项: state=${item.purchaseState}');
       return SubscriptionActionResult.failure(
         type: actionType,
+        silent: silent,
         productId: IosSubscriptionHelper.normalizedProductId(item),
         code: 'ignored-state',
         message: 'Purchase state is not eligible for processing.',
@@ -508,6 +529,7 @@ class SubscriptionCoordinator {
       _log('正在处理购买更新，跳过重复处理');
       return SubscriptionActionResult.failure(
         type: actionType,
+        silent: silent,
         productId: IosSubscriptionHelper.normalizedProductId(item),
         code: 'busy',
         message: 'Another purchase flow is in progress.',
@@ -525,6 +547,7 @@ class SubscriptionCoordinator {
         _log('忽略未知 SKU 的购买更新: rawId=${item.id}, productId=${item.productId}');
         return SubscriptionActionResult.failure(
           type: actionType,
+          silent: silent,
           productId: productId,
           code: 'unknown-sku',
           message: 'Purchase product ID is not managed by this service.',
@@ -551,6 +574,7 @@ class SubscriptionCoordinator {
       if (!verificationSuccess) {
         return SubscriptionActionResult.failure(
           type: actionType,
+          silent: silent,
           productId: productId,
           code: 'validation-failed',
           message: 'Subscription is not active after local validation.',
@@ -560,6 +584,7 @@ class SubscriptionCoordinator {
 
       return SubscriptionActionResult.success(
         type: actionType,
+        silent: silent,
         productId: productId,
         purchase: purchaseToFinish,
         message: source,
@@ -568,6 +593,7 @@ class SubscriptionCoordinator {
       _log('处理购买项异常: $e');
       return SubscriptionActionResult.failure(
         type: actionType,
+        silent: silent,
         productId: IosSubscriptionHelper.normalizedProductId(item),
         code: 'processing-exception',
         message: e.toString(),
@@ -630,6 +656,7 @@ class SubscriptionCoordinator {
   void _notifyStarted({
     required SubscriptionActionType type,
     required String source,
+    bool silent = false,
     String? productId,
   }) {
     config.actionObserver?.call(
@@ -637,17 +664,23 @@ class SubscriptionCoordinator {
         phase: SubscriptionActionPhase.started,
         type: type,
         source: source,
+        silent: silent,
         productId: productId,
       ),
     );
   }
 
-  void _notifyFinished(String source, SubscriptionActionResult result) {
+  void _notifyFinished(
+    String source,
+    SubscriptionActionResult result, {
+    bool silent = false,
+  }) {
     config.actionObserver?.call(
       SubscriptionActionEvent(
         phase: SubscriptionActionPhase.finished,
         type: result.type,
         source: source,
+        silent: silent || result.silent,
         productId: result.productId,
         result: result,
       ),

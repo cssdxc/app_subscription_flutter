@@ -74,11 +74,18 @@ class ExampleSubscriptionService extends GetxService {
     return coordinator.restore(source: source);
   }
 
+  Future<SubscriptionActionResult> restorePurchasesSilently({
+    String source = 'silent_restore',
+  }) {
+    return coordinator.restoreSilently(source: source);
+  }
+
   void _log(String message) {
     print('[Subscription] $message');
   }
 
-  Future<void> _reportTransaction(SubscriptionTransactionPayload payload) async {
+  Future<void> _reportTransaction(
+      SubscriptionTransactionPayload payload) async {
     // Call your backend here.
   }
 }

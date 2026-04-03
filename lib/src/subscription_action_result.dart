@@ -10,6 +10,7 @@ class SubscriptionActionResult {
   const SubscriptionActionResult({
     required this.type,
     required this.success,
+    this.silent = false,
     this.cancelled = false,
     this.productId,
     this.code,
@@ -20,6 +21,7 @@ class SubscriptionActionResult {
 
   final SubscriptionActionType type;
   final bool success;
+  final bool silent;
   final bool cancelled;
   final String? productId;
   final String? code;
@@ -31,6 +33,7 @@ class SubscriptionActionResult {
 
   factory SubscriptionActionResult.success({
     required SubscriptionActionType type,
+    bool silent = false,
     String? productId,
     PurchaseIOS? purchase,
     int restoredCount = 0,
@@ -39,6 +42,7 @@ class SubscriptionActionResult {
     return SubscriptionActionResult(
       type: type,
       success: true,
+      silent: silent,
       productId: productId,
       purchase: purchase,
       restoredCount: restoredCount,
@@ -48,6 +52,7 @@ class SubscriptionActionResult {
 
   factory SubscriptionActionResult.failure({
     required SubscriptionActionType type,
+    bool silent = false,
     String? productId,
     String? code,
     String? message,
@@ -58,6 +63,7 @@ class SubscriptionActionResult {
     return SubscriptionActionResult(
       type: type,
       success: false,
+      silent: silent,
       cancelled: cancelled,
       productId: productId,
       code: code,
