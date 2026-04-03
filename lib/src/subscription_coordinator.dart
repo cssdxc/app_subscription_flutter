@@ -474,12 +474,15 @@ class SubscriptionCoordinator {
     );
     if (validationResult == null) {
       final bool fallbackActive = IosSubscriptionHelper.isPurchaseActive(item);
+      final int fallbackExpirationMs = item?.expirationDateIOS?.toInt() ?? 0;
       _log(
-        'Local validation unavailable for $productId, fallback to transaction fields: active=$fallbackActive, tx=${item?.transactionIdFor}',
+        'Local validation unavailable for $productId, fallback to transaction fields: '
+        'active=$fallbackActive, tx=${item?.transactionIdFor}, '
+        'expirationMs=$fallbackExpirationMs, expiresAt=${_formatExpiration(fallbackExpirationMs)}',
       );
       await _reportTransaction(item);
       await _updateSubscriptionExpiration(
-        fallbackActive ? item?.expirationDateIOS?.toInt() ?? 0 : 0,
+        fallbackActive ? fallbackExpirationMs : 0,
       );
       return SubscriptionVerificationResult(
         isActive: fallbackActive,
@@ -497,9 +500,16 @@ class SubscriptionCoordinator {
     }
 
     final bool isActive = IosSubscriptionHelper.isPurchaseActive(verifiedItem);
+    final int verifiedExpirationMs =
+        verifiedItem?.expirationDateIOS?.toInt() ?? 0;
+    _log(
+      'Local validation resolved for $productId: '
+      'active=$isActive, tx=${verifiedItem?.transactionIdFor}, '
+      'expirationMs=$verifiedExpirationMs, expiresAt=${_formatExpiration(verifiedExpirationMs)}',
+    );
     await _reportTransaction(verifiedItem);
     await _updateSubscriptionExpiration(
-      isActive ? verifiedItem?.expirationDateIOS?.toInt() ?? 0 : 0,
+      isActive ? verifiedExpirationMs : 0,
     );
 
     return SubscriptionVerificationResult(
@@ -639,7 +649,18 @@ class SubscriptionCoordinator {
     final bool active = config.debugOverride
         ? true
         : expirationMs > DateTime.now().millisecondsSinceEpoch;
+    _log(
+      'update subscription expiration: '
+      'expirationMs=$expirationMs, expiresAt=${_formatExpiration(expirationMs)}, active=$active',
+    );
     isSubscribed.value = active;
+  }
+
+  String _formatExpiration(int expirationMs) {
+    if (expirationMs <= 0) {
+      return 'n/a';
+    }
+    return DateTime.fromMillisecondsSinceEpoch(expirationMs).toIso8601String();
   }
 
   bool get _hasInFlightOperation => _isProcessingPurchase || _isBuying;

@@ -78,8 +78,8 @@ class IosSubscriptionHelper {
     try {
       final Map<dynamic, dynamic>? rawResult = await channel
           .invokeMethod<Map<dynamic, dynamic>>('validateReceiptIOS', {
-            'apple': {'sku': productId},
-          });
+        'apple': {'sku': productId},
+      });
       if (rawResult == null) {
         return null;
       }
@@ -103,6 +103,12 @@ class IosSubscriptionHelper {
         isValid: result['isValid'] == true,
         latestTransaction: latestTransaction,
       );
+    } on PlatformException catch (e) {
+      logger?.call(
+        'Local iOS receipt validation failed for $productId: '
+        'code=${e.code}, message=${e.message}, details=${e.details}',
+      );
+      return null;
     } catch (e) {
       logger?.call('Local iOS receipt validation failed for $productId: $e');
       return null;
@@ -122,13 +128,11 @@ class IosSubscriptionHelper {
       tx['__typename'] ??= 'PurchaseIOS';
       tx['productId'] ??= productId;
       tx['platform'] ??= fallbackItem?.platform.toJson() ?? 'ios';
-      tx['purchaseState'] ??=
-          fallbackItem?.purchaseState.toJson() ??
+      tx['purchaseState'] ??= fallbackItem?.purchaseState.toJson() ??
           PurchaseState.Purchased.toJson();
       tx['isAutoRenewing'] ??= fallbackItem?.isAutoRenewing ?? false;
       tx['quantity'] ??= fallbackItem?.quantity ?? 1;
-      tx['transactionDate'] ??=
-          fallbackItem?.transactionDate ??
+      tx['transactionDate'] ??= fallbackItem?.transactionDate ??
           DateTime.now().millisecondsSinceEpoch;
 
       final String transactionId =
