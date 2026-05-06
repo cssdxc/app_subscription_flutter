@@ -1,12 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ios_subscription_helper.dart';
+import 'subscription_access_state.dart';
 import 'subscription_action_result.dart';
 import 'subscription_catalog.dart';
 
@@ -16,6 +18,9 @@ typedef SubscriptionTransactionReporter = Future<void> Function(
 );
 typedef SubscriptionActionObserver = void Function(
     SubscriptionActionEvent event);
+typedef ActiveSubscriptionQuery = Future<List<ActiveSubscription>> Function(
+  List<String>? productIds,
+);
 
 class SubscriptionTransactionPayload {
   const SubscriptionTransactionPayload({
@@ -68,23 +73,25 @@ class SubscriptionCoordinatorConfig {
   const SubscriptionCoordinatorConfig({
     required this.products,
     this.yearlyProductId,
-    this.expirationStorageKey = 'subscription_expiration_time',
+    this.accessStateStorageKey,
     this.debugOverride = false,
     this.logger,
     this.transactionReporter,
     this.actionObserver,
+    this.activeSubscriptionQuery,
   });
 
   final List<SubscriptionProductConfig> products;
   final String? yearlyProductId;
-  final String expirationStorageKey;
+  final String? accessStateStorageKey;
   final bool debugOverride;
   final SubscriptionLogger? logger;
   final SubscriptionTransactionReporter? transactionReporter;
   final SubscriptionActionObserver? actionObserver;
+  final ActiveSubscriptionQuery? activeSubscriptionQuery;
 }
 
-class SubscriptionCoordinator {
+class SubscriptionCoordinator with WidgetsBindingObserver {
   SubscriptionCoordinator({
     required this.sharedPreferences,
     required this.config,
@@ -108,6 +115,14 @@ class SubscriptionCoordinator {
 
   final ValueNotifier<bool> isSubscribed = ValueNotifier<bool>(false);
   final ValueNotifier<bool> hasFreeTrial = ValueNotifier<bool>(true);
+  final ValueNotifier<SubscriptionAccessState> accessState =
+      ValueNotifier<SubscriptionAccessState>(
+    const SubscriptionAccessState(
+      status: SubscriptionAccessStatus.unavailable,
+      evaluatedAtMs: 0,
+      note: 'not evaluated',
+    ),
+  );
   final ValueNotifier<List<ProductSubscriptionIOS>> products =
       ValueNotifier<List<ProductSubscriptionIOS>>(<ProductSubscriptionIOS>[]);
 
@@ -120,6 +135,11 @@ class SubscriptionCoordinator {
   bool _isProcessingPurchase = false;
   bool _isRestoring = false;
   bool _isBuying = false;
+  bool _isIapConnected = false;
+  bool _isLifecycleObserverRegistered = false;
+  bool _isForegroundRefreshRunning = false;
+  bool _isDisposed = false;
+  Future<bool>? _iapConnectionFuture;
 
   Future<void> get ready => _readyCompleter.future;
   bool get isReady => _readyCompleter.isCompleted;
@@ -129,67 +149,15 @@ class SubscriptionCoordinator {
   Future<void> init() async {
     try {
       await loadStoredStatus();
+      _registerLifecycleObserver();
 
-      final bool connected = await _iap.initConnection();
+      final bool connected = await _ensureIapConnection(source: 'init');
       if (!connected) {
-        _log('应用内购买不可用');
+        _log('应用内购买暂不可用，等待网络权限或前台恢复后重试');
         return;
       }
 
-      _purchaseUpdatedSubscription =
-          _iap.purchaseUpdated.listen((Purchase? purchase) async {
-        if (purchase == null || purchase is! PurchaseIOS) {
-          return;
-        }
-
-        _log(
-          '收到购买更新: state=${purchase.purchaseState}, id=${purchase.id}, tx=${purchase.transactionIdFor}',
-        );
-        if (!IosSubscriptionHelper.shouldProcessPurchaseUpdate(purchase)) {
-          _log('跳过非完成态购买更新: state=${purchase.purchaseState}');
-          return;
-        }
-        if (_isRestoring) {
-          _log('恢复购买进行中，忽略 purchaseUpdated 里的重复恢复事件');
-          return;
-        }
-        if (_isProcessingPurchase) {
-          _log('购买处理进行中，忽略重复购买更新');
-          return;
-        }
-
-        final SubscriptionActionType actionType = _pendingPurchaseAction != null
-            ? SubscriptionActionType.purchase
-            : SubscriptionActionType.sync;
-        final SubscriptionActionResult result = await _handlePurchasedItem(
-          purchase,
-          actionType: actionType,
-          source: _pendingPurchaseAction?.source ?? 'purchase_update',
-        );
-        _completePendingPurchaseAction(result);
-      });
-
-      _purchaseErrorSubscription =
-          _iap.purchaseErrorListener.listen((PurchaseError event) {
-        final String errorCode = event.code?.value ?? '';
-        _log('购买错误: code=$errorCode, message=${event.message}');
-        _isBuying = false;
-        final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
-        if (pendingAction != null && !pendingAction.completer.isCompleted) {
-          final SubscriptionActionResult result =
-              SubscriptionActionResult.failure(
-            type: SubscriptionActionType.purchase,
-            productId: pendingAction.productId,
-            code: errorCode,
-            message: event.message,
-            cancelled: event.code == ErrorCode.UserCancelled,
-          );
-          pendingAction.completer.complete(result);
-          _notifyFinished(pendingAction.source, result);
-        }
-        _pendingPurchaseAction = null;
-      });
-
+      _listenToPurchaseEvents();
       await restore(source: 'bootstrap', silent: true);
       await loadProducts();
     } finally {
@@ -203,6 +171,11 @@ class SubscriptionCoordinator {
     if (products.value.isNotEmpty) {
       return;
     }
+    final bool connected = await _ensureIapConnection(source: 'load_products');
+    if (!connected) {
+      _log('跳过商品加载：应用内购买连接暂不可用');
+      return;
+    }
     final List<ProductSubscriptionIOS> rawList = await _iap.fetchProducts(
       skus: productIds,
       type: ProductQueryType.Subs,
@@ -213,12 +186,85 @@ class SubscriptionCoordinator {
 
   Future<void> loadStoredStatus() async {
     if (config.debugOverride) {
-      isSubscribed.value = true;
+      _applyAccessState(
+        const SubscriptionAccessState(
+          status: SubscriptionAccessStatus.active,
+          evaluatedAtMs: 0,
+          note: 'debug override',
+        ),
+      );
       return;
     }
-    final int expirationMs =
-        sharedPreferences.getInt(config.expirationStorageKey) ?? 0;
-    isSubscribed.value = expirationMs > DateTime.now().millisecondsSinceEpoch;
+
+    final SubscriptionAccessState? storedState = _readStoredAccessState();
+    if (storedState != null) {
+      _applyAccessState(storedState);
+      return;
+    }
+
+    _applyAccessState(
+      const SubscriptionAccessState(
+        status: SubscriptionAccessStatus.unavailable,
+        evaluatedAtMs: 0,
+        note: 'no cached entitlement',
+      ),
+    );
+  }
+
+  Future<SubscriptionAccessState> refreshAccessState({
+    String source = 'manual_refresh',
+  }) async {
+    if (config.debugOverride) {
+      const SubscriptionAccessState overrideState = SubscriptionAccessState(
+        status: SubscriptionAccessStatus.active,
+        evaluatedAtMs: 0,
+        note: 'debug override',
+      );
+      _applyAccessState(overrideState);
+      return overrideState;
+    }
+
+    final List<ActiveSubscription>? subscriptions =
+        await _queryActiveSubscriptions();
+    if (subscriptions != null) {
+      final SubscriptionAccessState resolvedState =
+          IosSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
+        subscriptions,
+        fallbackProductId: productIds.join(','),
+        now: DateTime.now(),
+      );
+      await _updateSubscriptionAccessState(resolvedState);
+      _log(
+        'refresh subscription access from native entitlements: '
+        'source=$source status=${resolvedState.status.name}, '
+        'active=${resolvedState.shouldGrantAccess}',
+      );
+      return resolvedState;
+    }
+
+    final SubscriptionAccessState? cachedState = _readStoredAccessState();
+    if (cachedState != null) {
+      _applyAccessState(cachedState);
+      _log(
+        'native entitlements unavailable, fallback to cached snapshot: '
+        'source=$source status=${cachedState.status.name}, '
+        'active=${cachedState.shouldGrantAccess}',
+      );
+      return cachedState;
+    }
+
+    final SubscriptionAccessState unavailableState = SubscriptionAccessState(
+      status: SubscriptionAccessStatus.unavailable,
+      evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      note: 'native entitlements unavailable',
+    );
+    await _updateSubscriptionAccessState(unavailableState);
+    _log(
+      'refresh subscription access from native entitlements: '
+      'source=$source status=${unavailableState.status.name}, '
+      'active=${unavailableState.shouldGrantAccess}',
+    );
+    return unavailableState;
   }
 
   Future<void> refreshTrialEligibility() async {
@@ -279,6 +325,21 @@ class SubscriptionCoordinator {
     );
 
     try {
+      final bool connected = await _ensureIapConnection(source: source);
+      if (!connected) {
+        _isBuying = false;
+        _pendingPurchaseAction = null;
+        final SubscriptionActionResult result =
+            SubscriptionActionResult.failure(
+          type: SubscriptionActionType.purchase,
+          productId: product.id,
+          code: 'storekit-unavailable',
+          message: 'StoreKit is unavailable. Check network permission.',
+        );
+        _notifyFinished(source, result);
+        return result;
+      }
+      _listenToPurchaseEvents();
       await _iap.requestPurchaseWithBuilder(
         build: (builder) {
           builder
@@ -344,11 +405,45 @@ class SubscriptionCoordinator {
 
     try {
       _isRestoring = true;
+      final bool connected = await _ensureIapConnection(source: source);
+      if (!connected) {
+        final SubscriptionAccessState refreshedState =
+            await refreshAccessState(source: source);
+        final SubscriptionActionResult result = refreshedState.shouldGrantAccess
+            ? SubscriptionActionResult.success(
+                type: SubscriptionActionType.restore,
+                silent: silent,
+                productId: refreshedState.productId,
+                message: 'Subscription status is active from cached snapshot.',
+              )
+            : SubscriptionActionResult.failure(
+                type: SubscriptionActionType.restore,
+                silent: silent,
+                code: 'storekit-unavailable',
+                message: 'StoreKit is unavailable. Check network permission.',
+              );
+        _notifyFinished(source, result, silent: silent);
+        return result;
+      }
+      _listenToPurchaseEvents();
       if (Platform.isIOS) {
         await _iap.restorePurchases();
       }
       final List<Purchase> items = await _iap.getAvailablePurchases();
       if (items.isEmpty) {
+        final SubscriptionAccessState refreshedState =
+            await refreshAccessState(source: source);
+        if (refreshedState.shouldGrantAccess) {
+          final SubscriptionActionResult result =
+              SubscriptionActionResult.success(
+            type: SubscriptionActionType.restore,
+            silent: silent,
+            productId: refreshedState.productId,
+            message: 'Subscription status is active.',
+          );
+          _notifyFinished(source, result, silent: silent);
+          return result;
+        }
         final SubscriptionActionResult result =
             SubscriptionActionResult.success(
           type: SubscriptionActionType.restore,
@@ -379,13 +474,20 @@ class SubscriptionCoordinator {
       await refreshTrialEligibility();
 
       final SubscriptionActionResult finalResult = restoredCount == 0
-          ? SubscriptionActionResult.failure(
-              type: SubscriptionActionType.restore,
-              silent: silent,
-              code: 'restore-inactive',
-              message:
-                  'Restorable purchases were found, but none are currently active.',
-            )
+          ? (accessState.value.shouldGrantAccess
+              ? SubscriptionActionResult.success(
+                  type: SubscriptionActionType.restore,
+                  silent: silent,
+                  productId: accessState.value.productId,
+                  message: 'Subscription status is active.',
+                )
+              : SubscriptionActionResult.failure(
+                  type: SubscriptionActionType.restore,
+                  silent: silent,
+                  code: 'restore-inactive',
+                  message:
+                      'Restorable purchases were found, but none are currently active.',
+                ))
           : SubscriptionActionResult.success(
               type: SubscriptionActionType.restore,
               silent: silent,
@@ -442,6 +544,8 @@ class SubscriptionCoordinator {
   }
 
   Future<void> dispose() async {
+    _isDisposed = true;
+    _unregisterLifecycleObserver();
     await _purchaseUpdatedSubscription?.cancel();
     await _purchaseErrorSubscription?.cancel();
     try {
@@ -449,7 +553,16 @@ class SubscriptionCoordinator {
     } catch (_) {}
     isSubscribed.dispose();
     hasFreeTrial.dispose();
+    accessState.dispose();
     products.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) {
+      return;
+    }
+    unawaited(_refreshAccessStateAfterForeground());
   }
 
   Future<SubscriptionVerificationResult> _verifyCurrentSubscriptionByItem({
@@ -460,8 +573,15 @@ class SubscriptionCoordinator {
       _log(
         'Skip verifying purchase with invalid productId: rawId=${item?.id}, productId=${item?.productId}',
       );
-      await _updateSubscriptionExpiration(0);
-      return const SubscriptionVerificationResult(isActive: false);
+      final SubscriptionAccessState invalidState = SubscriptionAccessState(
+        status: SubscriptionAccessStatus.unavailable,
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        productId: productId,
+        transactionId: item?.transactionIdFor ?? '',
+        note: 'invalid productId',
+      );
+      await _updateSubscriptionAccessState(invalidState);
+      return SubscriptionVerificationResult(accessState: invalidState);
     }
 
     PurchaseIOS? verifiedItem = item;
@@ -473,47 +593,48 @@ class SubscriptionCoordinator {
       logger: _log,
     );
     if (validationResult == null) {
-      final bool fallbackActive = IosSubscriptionHelper.isPurchaseActive(item);
-      final int fallbackExpirationMs = item?.expirationDateIOS?.toInt() ?? 0;
       _log(
-        'Local validation unavailable for $productId, fallback to transaction fields: '
-        'active=$fallbackActive, tx=${item?.transactionIdFor}, '
-        'expirationMs=$fallbackExpirationMs, expiresAt=${_formatExpiration(fallbackExpirationMs)}',
-      );
-      await _reportTransaction(item);
-      await _updateSubscriptionExpiration(
-        fallbackActive ? fallbackExpirationMs : 0,
-      );
-      return SubscriptionVerificationResult(
-        isActive: fallbackActive,
-        resolvedItem: item,
-      );
+          'Local receipt validation unavailable for $productId, using native status');
+    } else if (!validationResult.isValid) {
+      _log(
+          'Local receipt validation failed for $productId, using native status');
     }
 
-    if (!validationResult.isValid) {
-      await _updateSubscriptionExpiration(0);
-      return const SubscriptionVerificationResult(isActive: false);
-    }
-
-    if (validationResult.latestTransaction != null) {
+    if (validationResult != null &&
+        validationResult.latestTransaction != null) {
       verifiedItem = validationResult.latestTransaction;
     }
 
-    final bool isActive = IosSubscriptionHelper.isPurchaseActive(verifiedItem);
-    final int verifiedExpirationMs =
-        verifiedItem?.expirationDateIOS?.toInt() ?? 0;
-    _log(
-      'Local validation resolved for $productId: '
-      'active=$isActive, tx=${verifiedItem?.transactionIdFor}, '
-      'expirationMs=$verifiedExpirationMs, expiresAt=${_formatExpiration(verifiedExpirationMs)}',
-    );
-    await _reportTransaction(verifiedItem);
-    await _updateSubscriptionExpiration(
-      isActive ? verifiedExpirationMs : 0,
+    final SubscriptionAccessState? verifiedState =
+        await _resolveAccessStateFromNativeStatus(
+      productId: productId,
+      fallbackTransactionId: verifiedItem?.transactionIdFor ?? '',
     );
 
+    if (verifiedState == null) {
+      final SubscriptionAccessState fallbackState =
+          await refreshAccessState(source: 'native_status_unavailable');
+      if (validationResult?.isValid == true && verifiedItem != null) {
+        await _reportTransaction(verifiedItem);
+      }
+      return SubscriptionVerificationResult(
+        accessState: fallbackState,
+        resolvedItem: verifiedItem,
+      );
+    }
+
+    _log(
+      'Native status resolved for $productId: '
+      'status=${verifiedState.status.name}, active=${verifiedState.shouldGrantAccess}, '
+      'tx=${verifiedItem?.transactionIdFor}',
+    );
+    if (validationResult?.isValid == true && verifiedItem != null) {
+      await _reportTransaction(verifiedItem);
+    }
+    await _updateSubscriptionAccessState(verifiedState);
+
     return SubscriptionVerificationResult(
-      isActive: isActive,
+      accessState: verifiedState,
       resolvedItem: verifiedItem,
     );
   }
@@ -644,16 +765,53 @@ class SubscriptionCoordinator {
     }
   }
 
-  Future<void> _updateSubscriptionExpiration(int expirationMs) async {
-    await sharedPreferences.setInt(config.expirationStorageKey, expirationMs);
-    final bool active = config.debugOverride
-        ? true
-        : expirationMs > DateTime.now().millisecondsSinceEpoch;
-    _log(
-      'update subscription expiration: '
-      'expirationMs=$expirationMs, expiresAt=${_formatExpiration(expirationMs)}, active=$active',
+  Future<void> _updateSubscriptionAccessState(
+    SubscriptionAccessState state,
+  ) async {
+    await sharedPreferences.setString(
+      _cachedAccessStorageKey,
+      jsonEncode(state.toJson()),
     );
+    _applyAccessState(state);
+    _log(
+      'update subscription access: '
+      'status=${state.status.name}, effectiveUntilMs=${state.effectiveUntilMs}, '
+      'effectiveUntil=${_formatExpiration(state.effectiveUntilMs ?? 0)}, '
+      'active=${state.shouldGrantAccess}',
+    );
+  }
+
+  void _applyAccessState(SubscriptionAccessState state) {
+    final bool active = config.debugOverride ? true : state.shouldGrantAccess;
+    accessState.value = state;
     isSubscribed.value = active;
+  }
+
+  SubscriptionAccessState? _readStoredAccessState() {
+    final String? cached = sharedPreferences.getString(_cachedAccessStorageKey);
+    if (cached != null && cached.isNotEmpty) {
+      try {
+        final dynamic decoded = jsonDecode(cached);
+        if (decoded is Map) {
+          final SubscriptionAccessState state =
+              SubscriptionAccessState.fromJson(decoded);
+          final int evaluatedAtMs = state.evaluatedAtMs;
+          if (evaluatedAtMs > 0 &&
+              DateTime.now().millisecondsSinceEpoch - evaluatedAtMs <=
+                  _cachedAccessStateTtl.inMilliseconds) {
+            return state;
+          }
+          _log(
+            'Cached access state expired: status=${state.status.name}, '
+            'evaluatedAtMs=$evaluatedAtMs',
+          );
+        }
+      } catch (e) {
+        _log('Failed to decode cached access state: $e');
+      }
+    }
+
+    return null;
   }
 
   String _formatExpiration(int expirationMs) {
@@ -663,7 +821,187 @@ class SubscriptionCoordinator {
     return DateTime.fromMillisecondsSinceEpoch(expirationMs).toIso8601String();
   }
 
+  String get _cachedAccessStorageKey {
+    final String? configured = config.accessStateStorageKey;
+    return (configured != null && configured.isNotEmpty)
+        ? configured
+        : 'subscription_access_state';
+  }
+
+  static const Duration _cachedAccessStateTtl = Duration(hours: 6);
+
   bool get _hasInFlightOperation => _isProcessingPurchase || _isBuying;
+
+  void _registerLifecycleObserver() {
+    if (_isLifecycleObserverRegistered) {
+      return;
+    }
+    WidgetsBinding.instance.addObserver(this);
+    _isLifecycleObserverRegistered = true;
+  }
+
+  void _unregisterLifecycleObserver() {
+    if (!_isLifecycleObserverRegistered) {
+      return;
+    }
+    WidgetsBinding.instance.removeObserver(this);
+    _isLifecycleObserverRegistered = false;
+  }
+
+  Future<bool> _ensureIapConnection({required String source}) {
+    if (_isIapConnected) {
+      return Future<bool>.value(true);
+    }
+
+    final Future<bool>? existingConnection = _iapConnectionFuture;
+    if (existingConnection != null) {
+      return existingConnection;
+    }
+
+    final Future<bool> connectionFuture = _connectIap(source: source);
+    _iapConnectionFuture = connectionFuture;
+    return connectionFuture;
+  }
+
+  Future<bool> _connectIap({required String source}) async {
+    try {
+      final bool connected = await _iap.initConnection();
+      _isIapConnected = connected;
+      if (!connected) {
+        _log('应用内购买连接不可用: source=$source');
+      }
+      return connected;
+    } catch (e) {
+      _isIapConnected = false;
+      _log('应用内购买连接失败: source=$source, error=$e');
+      return false;
+    } finally {
+      _iapConnectionFuture = null;
+    }
+  }
+
+  void _listenToPurchaseEvents() {
+    _purchaseUpdatedSubscription ??=
+        _iap.purchaseUpdated.listen((Purchase? purchase) async {
+      if (purchase == null || purchase is! PurchaseIOS) {
+        return;
+      }
+
+      _log(
+        '收到购买更新: state=${purchase.purchaseState}, id=${purchase.id}, tx=${purchase.transactionIdFor}',
+      );
+      if (!IosSubscriptionHelper.shouldProcessPurchaseUpdate(purchase)) {
+        _log('跳过非完成态购买更新: state=${purchase.purchaseState}');
+        return;
+      }
+      if (_isRestoring) {
+        _log('恢复购买进行中，忽略 purchaseUpdated 里的重复恢复事件');
+        return;
+      }
+      if (_isProcessingPurchase) {
+        _log('购买处理进行中，忽略重复购买更新');
+        return;
+      }
+
+      final SubscriptionActionType actionType = _pendingPurchaseAction != null
+          ? SubscriptionActionType.purchase
+          : SubscriptionActionType.sync;
+      final SubscriptionActionResult result = await _handlePurchasedItem(
+        purchase,
+        actionType: actionType,
+        source: _pendingPurchaseAction?.source ?? 'purchase_update',
+      );
+      _completePendingPurchaseAction(result);
+    });
+
+    _purchaseErrorSubscription ??=
+        _iap.purchaseErrorListener.listen((PurchaseError event) {
+      final String errorCode = event.code?.value ?? '';
+      _log('购买错误: code=$errorCode, message=${event.message}');
+      _isBuying = false;
+      final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
+      if (pendingAction != null && !pendingAction.completer.isCompleted) {
+        final SubscriptionActionResult result =
+            SubscriptionActionResult.failure(
+          type: SubscriptionActionType.purchase,
+          productId: pendingAction.productId,
+          code: errorCode,
+          message: event.message,
+          cancelled: event.code == ErrorCode.UserCancelled,
+        );
+        pendingAction.completer.complete(result);
+        _notifyFinished(pendingAction.source, result);
+      }
+      _pendingPurchaseAction = null;
+    });
+  }
+
+  Future<void> _refreshAccessStateAfterForeground() async {
+    if (_isDisposed ||
+        _isForegroundRefreshRunning ||
+        _hasInFlightOperation ||
+        _isRestoring) {
+      return;
+    }
+
+    _isForegroundRefreshRunning = true;
+    try {
+      final bool connected = await _ensureIapConnection(source: 'app_resumed');
+      if (connected) {
+        _listenToPurchaseEvents();
+      }
+      await refreshAccessState(source: 'app_resumed');
+      if (connected && products.value.isEmpty) {
+        await loadProducts();
+      }
+    } finally {
+      _isForegroundRefreshRunning = false;
+    }
+  }
+
+  Future<List<ActiveSubscription>?> _queryActiveSubscriptions() async {
+    try {
+      final ActiveSubscriptionQuery? query = config.activeSubscriptionQuery;
+      if (query != null) {
+        return await query(productIds);
+      }
+      final bool connected =
+          await _ensureIapConnection(source: 'query_active_subscriptions');
+      if (!connected) {
+        return null;
+      }
+      return await _iap.getActiveSubscriptions(productIds);
+    } catch (e) {
+      _isIapConnected = false;
+      _log('查询活跃订阅权益失败: productIds=$productIds, error=$e');
+      return null;
+    }
+  }
+
+  Future<SubscriptionAccessState?> _resolveAccessStateFromNativeStatus({
+    required String productId,
+    required String fallbackTransactionId,
+  }) async {
+    final List<ActiveSubscription>? subscriptions =
+        await _queryActiveSubscriptions();
+    if (subscriptions == null) {
+      return null;
+    }
+
+    final List<ActiveSubscription> matchingSubscriptions = subscriptions
+        .where((subscription) => subscription.productId == productId)
+        .toList(growable: false);
+    final SubscriptionAccessState state =
+        IosSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
+      matchingSubscriptions,
+      fallbackProductId: productId,
+      now: DateTime.now(),
+    );
+    if (state.transactionId.isNotEmpty || fallbackTransactionId.isEmpty) {
+      return state;
+    }
+    return state.copyWith(transactionId: fallbackTransactionId);
+  }
 
   void _completePendingPurchaseAction(SubscriptionActionResult result) {
     final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;

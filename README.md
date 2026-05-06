@@ -1,36 +1,27 @@
 # app_subscription_flutter
 
-基于 `flutter_inapp_purchase` 的 iOS 订阅通用封装。
+基于 `flutter_inapp_purchase` 的 iOS 订阅核心封装。
 
-目标是把这几件事统一收口：
+这个 package 只负责订阅核心流程：
 
 - 商品拉取
 - 发起购买
 - 恢复购买
-- 本地订阅校验
-- 订阅状态和过期时间缓存
+- 本地收据校验
+- 原生活跃权益同步
+- 订阅权益门禁状态缓存
 - 免费试用资格判断
-- 交易回传你自己的后端
-- 统一的日志和动作事件回调
+- 交易信息回传宿主工程
+- 日志和流程事件回调
 
-这个仓库只负责“订阅核心层”。  
-`loading`、`toast`、埋点、路由跳转这类 UI 行为建议放在宿主工程里，通过回调或单独的 UI delegate 处理。
-
-## 特性
-
-- iOS 本地校验，不依赖 `verifyReceipt + shared secret`
-- 返回统一的 `SubscriptionActionResult`
-- 调用方只需要配置产品 ID 和默认价格
-- 后端接口通过 `transactionReporter` 回调接入
-- 日志通过 `logger` 回调接入
-- 流程事件通过 `actionObserver` 回调接入
-- 支持宿主项目再包一层 `SubscriptionUiDelegate`
+UI 行为不放在 package 里。`loading`、`toast`、埋点、路由跳转、多语言文案、订阅失效后的业务处理，都应由宿主工程通过 service 或 UI delegate 接入。
 
 ## 要求
 
 - Flutter 项目
 - iOS 15+
-- 依赖 `flutter_inapp_purchase`
+- `flutter_inapp_purchase`
+- `shared_preferences`
 
 ## 安装
 
@@ -42,7 +33,7 @@ dependencies:
       ref: main
 ```
 
-更推荐你在项目稳定后改成 tag：
+项目稳定后建议改成固定 tag：
 
 ```yaml
 dependencies:
@@ -52,23 +43,11 @@ dependencies:
       ref: v0.1.0
 ```
 
-## 导出内容
-
-- `SubscriptionCoordinator`
-- `SubscriptionCoordinatorConfig`
-- `SubscriptionProductConfig`
-- `SubscriptionActionResult`
-- `SubscriptionActionEvent`
-- `SubscriptionTransactionPayload`
-- `IosSubscriptionHelper`
-- `SubscriptionCatalog`
-
-## 核心用法
-
-### 1. 初始化 `SubscriptionCoordinator`
+## 初始化
 
 ```dart
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 late final SubscriptionCoordinator subscriptionCoordinator;
@@ -121,29 +100,94 @@ void _observeSubscriptionAction(SubscriptionActionEvent event) {
 }
 ```
 
-### 2. 读取状态
+`init()` 会完成这些事情：
+
+- 先读取 6 小时内的本地权益快照
+- 建立 StoreKit / `flutter_inapp_purchase` 连接
+- 注册购买事件监听
+- 静默恢复当前购买
+- 加载商品
+- 注册 App 前后台监听
+
+如果首次启动时 iOS 网络权限尚未确认，StoreKit 暂不可用，`init()` 不会卡死。coordinator 会先使用可用缓存或给出 `unavailable`，并在 App 回到前台时自动重连、刷新权益和补加载商品。
+
+## 判断是否放行
+
+调用方只使用 `accessState.shouldGrantAccess` 判断是否给用户订阅权益：
 
 ```dart
-final bool subscribed = subscriptionCoordinator.isSubscribed.value;
-final bool hasFreeTrial = subscriptionCoordinator.hasFreeTrial.value;
-final List<ProductSubscriptionIOS> products = subscriptionCoordinator.products.value;
+final SubscriptionAccessState state =
+    subscriptionCoordinator.accessState.value;
+
+if (state.shouldGrantAccess) {
+  // 放行订阅权益
+} else {
+  // 拦截，展示订阅页或恢复购买入口
+}
 ```
 
-如果你在 `GetX`、`Provider`、`Riverpod` 里使用，建议把这几个 `ValueNotifier` 再桥接到你自己的状态管理层。
+监听状态变化：
 
-### 3. 加载商品
+```dart
+subscriptionCoordinator.accessState.addListener(() {
+  final state = subscriptionCoordinator.accessState.value;
+
+  if (state.shouldGrantAccess) {
+    // 放行
+  } else {
+    // 拦截
+  }
+});
+```
+
+不要用本地时间、`expirationDateIOS`、`SharedPreferences` 里的缓存值作为门禁依据。`isSubscribed` 只保留给旧代码兼容，新代码应使用：
+
+```dart
+subscriptionCoordinator.accessState.value.shouldGrantAccess
+```
+
+## 状态含义
+
+```dart
+enum SubscriptionAccessStatus {
+  active,
+  gracePeriod,
+  billingRetry,
+  revoked,
+  expired,
+  unavailable,
+}
+```
+
+放行状态：
+
+- `active`
+- `gracePeriod`
+
+拦截状态：
+
+- `billingRetry`
+- `revoked`
+- `expired`
+- `unavailable`
+
+iOS 侧以 `flutter_inapp_purchase.getActiveSubscriptions(productIds)` 返回的原生活跃权益作为事实源。原生查询失败时，6 小时内使用最后一次已验证快照；缓存不存在或超过 6 小时则返回 `unavailable`。
+
+## 商品、购买和恢复
+
+加载商品：
 
 ```dart
 await subscriptionCoordinator.loadProducts();
 
-final monthProduct = subscriptionCoordinator.findProduct('subscribe_month_1');
-final monthPrice = subscriptionCoordinator.findPrice(
+final product = subscriptionCoordinator.findProduct('subscribe_month_1');
+final price = subscriptionCoordinator.findPrice(
   'subscribe_month_1',
   '\$19.99',
 );
 ```
 
-### 4. 发起购买
+发起购买：
 
 ```dart
 final result = await subscriptionCoordinator.purchase(
@@ -152,7 +196,7 @@ final result = await subscriptionCoordinator.purchase(
 );
 
 if (result.success) {
-  // 已订阅成功
+  // 购买成功
 } else if (result.cancelled) {
   // 用户取消
 } else {
@@ -160,7 +204,7 @@ if (result.success) {
 }
 ```
 
-### 5. 恢复购买
+恢复购买：
 
 ```dart
 final result = await subscriptionCoordinator.restore(
@@ -168,168 +212,120 @@ final result = await subscriptionCoordinator.restore(
 );
 
 if (result.success) {
-  print('restoredCount=${result.restoredCount}');
+  // 恢复成功或当前权益有效
+} else {
+  // 恢复失败
 }
 ```
 
-## 推荐的宿主工程包装层
-
-虽然可以直接在页面里调用 `SubscriptionCoordinator`，但更推荐每个项目再包一层自己的 service。
-
-这样可以把这些内容留在业务层：
-
-- 当前项目的产品常量
-- 订阅失效后要重置的配置
-- 非订阅业务限制逻辑
-- 项目自己的状态管理桥接
-
-示例思路见：
-
-- [example/lib/subscription_service_example.dart](./example/lib/subscription_service_example.dart)
-
-## `transactionReporter` 怎么用
-
-这个回调就是给你接后端的，不要写死在 package 里。
+静默恢复：
 
 ```dart
-Future<void> _reportTransaction(SubscriptionTransactionPayload payload) async {
-  await api.userTransaction(
-    payload.originalTransactionId,
-    payload.currentTransactionId,
+await subscriptionCoordinator.restoreSilently(source: 'app_bootstrap');
+```
+
+## 推荐封装方式
+
+宿主工程可以再包一层自己的 service，用来集中产品 ID、状态桥接和后端接入：
+
+```dart
+class AppSubscriptionService {
+  final ValueNotifier<SubscriptionAccessState> accessState =
+      ValueNotifier<SubscriptionAccessState>(
+    const SubscriptionAccessState(
+      status: SubscriptionAccessStatus.unavailable,
+      evaluatedAtMs: 0,
+      note: 'not evaluated',
+    ),
   );
-}
-```
 
-如果你的后端以后要收更多字段，也可以直接从 `payload` 里扩展。
+  late final SubscriptionCoordinator coordinator;
 
-## `logger` 怎么用
+  bool get shouldGrantAccess => accessState.value.shouldGrantAccess;
 
-推荐你在宿主项目统一接自己的 logger：
+  Future<void> init() async {
+    final prefs = await SharedPreferences.getInstance();
 
-```dart
-logger: (message) {
-  AppLogger.d('[Subscription] $message');
-},
-```
-
-这样后续所有项目的订阅日志格式都能统一。
-
-## `actionObserver` 怎么用
-
-这个回调适合做：
-
-- loading 生命周期
-- 埋点
-- 调试排查
-
-```dart
-actionObserver: (event) {
-  debugPrint(
-    '[SubscriptionAction] phase=${event.phase} type=${event.type} source=${event.source}',
-  );
-},
-```
-
-## 推荐的 `SubscriptionUiDelegate`
-
-这个类不放进 package，本意是让每个宿主工程用自己的 UI 框架和国际化系统实现。
-
-如果你的项目用的是：
-
-- `EasyLoading`
-- `FirebaseAnalytics`
-- `GetX .tr`
-
-那可以直接按下面这个模式写：
-
-```dart
-class SubscriptionUiDelegate {
-  Future<SubscriptionActionResult> purchase({
-    required ProductSubscriptionIOS? product,
-    required String source,
-  }) async {
-    EasyLoading.show();
-    final result = await subscriptionService.purchaseSubscription(
-      product,
-      source: source,
-    );
-    EasyLoading.dismiss();
-
-    if (result.success) {
-      FirebaseAnalytics.instance.logEvent(
-        name: 'subscription_success',
-        parameters: {
-          'source': source,
-          'product_id': result.productId ?? '',
+    coordinator = SubscriptionCoordinator(
+      sharedPreferences: prefs,
+      config: SubscriptionCoordinatorConfig(
+        yearlyProductId: 'subscribe_year_1',
+        products: const [
+          SubscriptionProductConfig(
+            id: 'subscribe_month_1',
+            defaultPrice: '\$19.99',
+          ),
+          SubscriptionProductConfig(
+            id: 'subscribe_year_1',
+            defaultPrice: '\$49.99',
+          ),
+        ],
+        logger: (message) {
+          debugPrint('[Subscription] $message');
         },
-      );
-      return result;
-    }
+        transactionReporter: (payload) async {
+          await api.userTransaction(
+            payload.originalTransactionId,
+            payload.currentTransactionId,
+          );
+        },
+      ),
+    );
 
-    if (result.cancelled) {
-      EasyLoading.showError(TextKey.cancel.tr);
-      return result;
-    }
+    coordinator.accessState.addListener(() {
+      accessState.value = coordinator.accessState.value;
+    });
 
-    EasyLoading.showError(TextKey.buyFailed.tr);
-    return result;
+    await coordinator.init();
   }
 
-  Future<SubscriptionActionResult> restore({
-    required String source,
-  }) async {
-    EasyLoading.show();
-    final result = await subscriptionService.restorePurchases(source: source);
-    EasyLoading.dismiss();
+  Future<SubscriptionActionResult> purchaseMonthly() {
+    return coordinator.purchase(
+      coordinator.findProduct('subscribe_month_1'),
+      source: 'paywall_monthly',
+    );
+  }
 
-    if (result.failed) {
-      EasyLoading.showError(TextKey.restoreFailed.tr);
-    }
-    return result;
+  Future<SubscriptionActionResult> restore() {
+    return coordinator.restore(source: 'settings_restore');
+  }
+
+  Future<void> dispose() {
+    accessState.dispose();
+    return coordinator.dispose();
   }
 }
 ```
-
-重点是：
-
-- 国际化消息放宿主项目里处理
-- 成功埋点放宿主项目里处理
-- loading / toast 放宿主项目里处理
-- package 只返回结果，不直接弹 UI
 
 完整示例见：
 
-- [example/lib/subscription_ui_delegate_example.dart](./example/lib/subscription_ui_delegate_example.dart)
-
-## 一个完整接入流程
-
-1. 在宿主工程初始化 `SharedPreferences`
-2. 创建 `SubscriptionCoordinator`
-3. 配置产品 ID、默认价格、`logger`、`transactionReporter`
-4. 调用 `await coordinator.init()`
-5. 用你自己的 service 把 `ValueNotifier` 状态桥接出去
-6. 页面层通过自己的 `SubscriptionUiDelegate` 调用购买/恢复
-
-## Example
-
-示例代码在：
-
 - [example/lib/subscription_service_example.dart](./example/lib/subscription_service_example.dart)
 - [example/lib/subscription_ui_delegate_example.dart](./example/lib/subscription_ui_delegate_example.dart)
 
-这些示例不是完整 App，而是“集成模板”。
+## 生命周期
 
-## 当前边界
+`SubscriptionCoordinator` 会监听 `AppLifecycleState.resumed`。App 从后台回到前台时会自动：
 
-当前主要面向 iOS 订阅场景。
+- 重试 StoreKit 连接
+- 刷新 `accessState`
+- 在商品列表为空时补加载商品
 
-没有放进 package 的东西：
+购买、恢复、前台刷新有并发保护。调用方不需要在页面生命周期里重复刷新订阅状态。
 
-- 你的后端 API 实现
-- `EasyLoading`
-- 多语言文案
+释放：
+
+```dart
+await subscriptionCoordinator.dispose();
+```
+
+## 宿主工程负责的内容
+
+这些内容不属于 package：
+
+- 后端 API 的具体实现
+- loading / toast
 - 页面跳转
-- 埋点平台具体实现
-- 导航限制、功能解锁这类强业务逻辑
-
-这些都应该留在宿主工程里。
+- 埋点平台
+- 多语言文案
+- 功能解锁后的业务逻辑
+- 订阅失效后的业务重置逻辑

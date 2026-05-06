@@ -1,14 +1,18 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'subscription_access_state.dart';
+
 class SubscriptionVerificationResult {
   const SubscriptionVerificationResult({
-    required this.isActive,
+    required this.accessState,
     this.resolvedItem,
   });
 
-  final bool isActive;
+  final SubscriptionAccessState accessState;
   final PurchaseIOS? resolvedItem;
+
+  bool get isActive => accessState.shouldGrantAccess;
 }
 
 class IOSLocalValidationResult {
@@ -48,25 +52,78 @@ class IosSubscriptionHelper {
         productId.isNotEmpty;
   }
 
-  static bool isPurchaseActive(PurchaseIOS? item) {
-    if (item == null) {
-      return false;
+  static SubscriptionAccessState selectMostRelevantAccessState(
+    Iterable<SubscriptionAccessState> states,
+  ) {
+    final List<SubscriptionAccessState> resolvedStates =
+        states.toList(growable: false);
+    if (resolvedStates.isEmpty) {
+      return SubscriptionAccessState(
+        status: SubscriptionAccessStatus.unavailable,
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        note: 'no subscription access states',
+      );
     }
 
-    if (item.purchaseState != PurchaseState.Purchased) {
-      return false;
+    SubscriptionAccessState bestState = resolvedStates.first;
+    for (final SubscriptionAccessState candidate in resolvedStates.skip(1)) {
+      bestState = _preferAccessState(bestState, candidate);
+    }
+    return bestState;
+  }
+
+  static SubscriptionAccessState resolveAccessStateFromActiveSubscription({
+    required ActiveSubscription subscription,
+    DateTime? now,
+  }) {
+    // Apple currentEntitlements grants auto-renewable subscriptions only when
+    // the renewal state is subscribed or inGracePeriod.
+    // https://developer.apple.com/documentation/storekit/transaction/currententitlements
+    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final RenewalInfoIOS? renewalInfo = subscription.renewalInfoIOS;
+    final int? graceUntilMs = renewalInfo?.gracePeriodExpirationDate?.toInt();
+    final SubscriptionAccessStatus status = graceUntilMs != null
+        ? SubscriptionAccessStatus.gracePeriod
+        : SubscriptionAccessStatus.active;
+
+    return SubscriptionAccessState(
+      status: subscription.isActive ? status : SubscriptionAccessStatus.expired,
+      evaluatedAtMs: nowMs,
+      effectiveUntilMs: graceUntilMs ?? subscription.expirationDateIOS?.toInt(),
+      productId: subscription.productId,
+      transactionId: subscription.transactionId,
+      note: subscription.isActive
+          ? (status == SubscriptionAccessStatus.gracePeriod
+              ? 'active native entitlement in grace period'
+              : 'active native entitlement')
+          : 'inactive native subscription',
+    );
+  }
+
+  static SubscriptionAccessState resolveAccessStateFromActiveSubscriptions(
+    List<ActiveSubscription> subscriptions, {
+    required String fallbackProductId,
+    DateTime? now,
+  }) {
+    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    if (subscriptions.isEmpty) {
+      return SubscriptionAccessState(
+        status: SubscriptionAccessStatus.expired,
+        evaluatedAtMs: nowMs,
+        productId: fallbackProductId,
+        note: 'no active native entitlement',
+      );
     }
 
-    if (item.revocationDateIOS != null && item.revocationDateIOS! > 0) {
-      return false;
-    }
-
-    final double? expirationDateMs = item.expirationDateIOS;
-    if (expirationDateMs == null || expirationDateMs <= 0) {
-      return false;
-    }
-
-    return expirationDateMs > DateTime.now().millisecondsSinceEpoch;
+    final List<SubscriptionAccessState> resolvedStates = subscriptions
+        .map(
+          (subscription) => resolveAccessStateFromActiveSubscription(
+            subscription: subscription,
+            now: now,
+          ),
+        )
+        .toList(growable: false);
+    return selectMostRelevantAccessState(resolvedStates);
   }
 
   static Future<IOSLocalValidationResult?> validateReceiptLocally({
@@ -237,5 +294,45 @@ class IosSubscriptionHelper {
       '免费试用资格(回退): $eligible | 产品含试用: $productHasFreeTrial | 有订阅历史: $userHasSubscriptionHistory',
     );
     return eligible;
+  }
+
+  static SubscriptionAccessState _preferAccessState(
+    SubscriptionAccessState first,
+    SubscriptionAccessState second,
+  ) {
+    if (first.shouldGrantAccess != second.shouldGrantAccess) {
+      return first.shouldGrantAccess ? first : second;
+    }
+
+    final int firstPriority = _accessStatePriority(first.status);
+    final int secondPriority = _accessStatePriority(second.status);
+    if (firstPriority != secondPriority) {
+      return firstPriority < secondPriority ? first : second;
+    }
+
+    final int firstUntil = first.effectiveUntilMs ?? -1;
+    final int secondUntil = second.effectiveUntilMs ?? -1;
+    if (firstUntil != secondUntil) {
+      return firstUntil > secondUntil ? first : second;
+    }
+
+    return first.evaluatedAtMs >= second.evaluatedAtMs ? first : second;
+  }
+
+  static int _accessStatePriority(SubscriptionAccessStatus status) {
+    switch (status) {
+      case SubscriptionAccessStatus.active:
+        return 0;
+      case SubscriptionAccessStatus.gracePeriod:
+        return 1;
+      case SubscriptionAccessStatus.revoked:
+        return 2;
+      case SubscriptionAccessStatus.billingRetry:
+        return 3;
+      case SubscriptionAccessStatus.expired:
+        return 4;
+      case SubscriptionAccessStatus.unavailable:
+        return 5;
+    }
   }
 }

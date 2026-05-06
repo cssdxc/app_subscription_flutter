@@ -1,6 +1,5 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
-import 'package:firebase_analytics/firebase_analytics.dart';
-import 'package:flutter_easyloading/flutter_easyloading.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_service_example.dart';
@@ -20,42 +19,61 @@ class ExampleSubscriptionUiDelegate {
     required ProductSubscriptionIOS? product,
     required String source,
   }) async {
-    EasyLoading.show();
+    debugPrint('[SubscriptionUI] loading');
     final result = await subscriptionService.purchaseSubscription(
       product,
       source: source,
     );
-    EasyLoading.dismiss();
+    debugPrint('[SubscriptionUI] done');
 
     if (result.success) {
-      FirebaseAnalytics.instance.logEvent(
-        name: 'subscription_success',
-        parameters: {
-          'source': source,
-          'product_id': result.productId ?? '',
-        },
+      debugPrint(
+        '[SubscriptionUI] success source=$source productId=${result.productId ?? ''}',
       );
       return result;
     }
 
     if (result.cancelled) {
-      EasyLoading.showError(ExampleTextKey.cancel);
+      debugPrint(ExampleTextKey.cancel);
       return result;
     }
 
-    EasyLoading.showError(ExampleTextKey.buyFailed);
+    debugPrint(ExampleTextKey.buyFailed);
+    return result;
+  }
+
+  Future<SubscriptionActionResult> purchaseMonthly({
+    String source = 'paywall_monthly',
+  }) async {
+    debugPrint('[SubscriptionUI] loading');
+    final result = await subscriptionService.purchaseMonthly(source: source);
+    debugPrint('[SubscriptionUI] done');
+
+    if (result.success) {
+      debugPrint(
+        '[SubscriptionUI] success source=$source productId=${result.productId ?? ''}',
+      );
+      return result;
+    }
+
+    if (result.cancelled) {
+      debugPrint(ExampleTextKey.cancel);
+      return result;
+    }
+
+    debugPrint(ExampleTextKey.buyFailed);
     return result;
   }
 
   Future<SubscriptionActionResult> restore({
     required String source,
   }) async {
-    EasyLoading.show();
+    debugPrint('[SubscriptionUI] loading');
     final result = await subscriptionService.restorePurchases(source: source);
-    EasyLoading.dismiss();
+    debugPrint('[SubscriptionUI] done');
 
     if (result.failed) {
-      EasyLoading.showError(ExampleTextKey.restoreFailed);
+      debugPrint(ExampleTextKey.restoreFailed);
     }
     return result;
   }

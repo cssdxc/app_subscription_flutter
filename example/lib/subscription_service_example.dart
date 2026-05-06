@@ -1,13 +1,20 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
-import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-class ExampleSubscriptionService extends GetxService {
-  final RxBool isSubscribed = false.obs;
-  final hasFreeTrial = true.obs;
-  final RxList<ProductSubscriptionIOS> products =
-      <ProductSubscriptionIOS>[].obs;
+class ExampleSubscriptionService {
+  final ValueNotifier<bool> hasFreeTrial = ValueNotifier<bool>(true);
+  final ValueNotifier<SubscriptionAccessState> accessState =
+      ValueNotifier<SubscriptionAccessState>(
+    const SubscriptionAccessState(
+      status: SubscriptionAccessStatus.unavailable,
+      evaluatedAtMs: 0,
+      note: 'not evaluated',
+    ),
+  );
+  final ValueNotifier<List<ProductSubscriptionIOS>> products =
+      ValueNotifier<List<ProductSubscriptionIOS>>(<ProductSubscriptionIOS>[]);
 
   late final SubscriptionCoordinator coordinator;
 
@@ -15,7 +22,9 @@ class ExampleSubscriptionService extends GetxService {
   final subscribeMonth1 = 'subscribe_month_1';
   final subscribeYear1 = 'subscribe_year_1';
 
-  Future<ExampleSubscriptionService> init() async {
+  bool get shouldGrantAccess => accessState.value.shouldGrantAccess;
+
+  Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
 
     coordinator = SubscriptionCoordinator(
@@ -41,8 +50,8 @@ class ExampleSubscriptionService extends GetxService {
       ),
     );
 
-    coordinator.isSubscribed.addListener(() {
-      isSubscribed.value = coordinator.isSubscribed.value;
+    coordinator.accessState.addListener(() {
+      accessState.value = coordinator.accessState.value;
     });
     coordinator.hasFreeTrial.addListener(() {
       hasFreeTrial.value = coordinator.hasFreeTrial.value;
@@ -51,14 +60,31 @@ class ExampleSubscriptionService extends GetxService {
       products.value = coordinator.products.value;
     });
 
-    await coordinator.init();
-    return this;
+    return coordinator.init();
   }
 
   Future<void> loadProducts() => coordinator.loadProducts();
 
   ProductSubscriptionIOS? findProduct(String productId) {
     return coordinator.findProduct(productId);
+  }
+
+  Future<SubscriptionActionResult> purchaseMonthly({
+    String source = 'paywall_monthly',
+  }) {
+    return purchaseSubscription(
+      findProduct(subscribeMonth1),
+      source: source,
+    );
+  }
+
+  Future<SubscriptionActionResult> purchaseYearly({
+    String source = 'paywall_yearly',
+  }) {
+    return purchaseSubscription(
+      findProduct(subscribeYear1),
+      source: source,
+    );
   }
 
   Future<SubscriptionActionResult> purchaseSubscription(
@@ -80,8 +106,15 @@ class ExampleSubscriptionService extends GetxService {
     return coordinator.restoreSilently(source: source);
   }
 
+  Future<void> dispose() async {
+    hasFreeTrial.dispose();
+    accessState.dispose();
+    products.dispose();
+    await coordinator.dispose();
+  }
+
   void _log(String message) {
-    print('[Subscription] $message');
+    debugPrint('[Subscription] $message');
   }
 
   Future<void> _reportTransaction(
