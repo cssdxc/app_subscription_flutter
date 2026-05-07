@@ -119,6 +119,66 @@ void main() {
     expect(coordinator.isSubscribed.value, isFalse);
   });
 
+  test('retains active grace period when native entitlements are empty',
+      () async {
+    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      cacheKey: jsonEncode(
+        SubscriptionAccessState(
+          status: SubscriptionAccessStatus.gracePeriod,
+          evaluatedAtMs: cachedAt,
+          effectiveUntilMs: cachedAt + 10000,
+          productId: 'subscribe_month_1',
+          transactionId: 'tx-grace',
+        ).toJson(),
+      ),
+    });
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => <ActiveSubscription>[],
+    );
+
+    await coordinator.loadStoredStatus();
+    final SubscriptionAccessState resolvedState =
+        await coordinator.refreshAccessState(source: 'test');
+
+    expect(resolvedState.status, SubscriptionAccessStatus.gracePeriod);
+    expect(resolvedState.shouldGrantAccess, isTrue);
+    expect(resolvedState.effectiveUntilMs, cachedAt + 10000);
+    expect(coordinator.isSubscribed.value, isTrue);
+  });
+
+  test(
+      'does not retain expired grace period when native entitlements are empty',
+      () async {
+    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      cacheKey: jsonEncode(
+        SubscriptionAccessState(
+          status: SubscriptionAccessStatus.gracePeriod,
+          evaluatedAtMs: cachedAt,
+          effectiveUntilMs: cachedAt - 1,
+          productId: 'subscribe_month_1',
+          transactionId: 'tx-grace',
+        ).toJson(),
+      ),
+    });
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => <ActiveSubscription>[],
+    );
+
+    await coordinator.loadStoredStatus();
+    final SubscriptionAccessState resolvedState =
+        await coordinator.refreshAccessState(source: 'test');
+
+    expect(resolvedState.status, SubscriptionAccessStatus.expired);
+    expect(resolvedState.shouldGrantAccess, isFalse);
+    expect(coordinator.isSubscribed.value, isFalse);
+  });
+
   test('ignores stale cached snapshot after the six hour TTL', () async {
     final int staleAt = DateTime.now().millisecondsSinceEpoch -
         const Duration(hours: 6).inMilliseconds -

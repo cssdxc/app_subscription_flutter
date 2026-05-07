@@ -233,13 +233,15 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         fallbackProductId: productIds.join(','),
         now: DateTime.now(),
       );
-      await _updateSubscriptionAccessState(resolvedState);
+      final SubscriptionAccessState writableState =
+          _resolveWritableAccessState(resolvedState);
+      await _updateSubscriptionAccessState(writableState);
       _log(
         'refresh subscription access from native entitlements: '
-        'source=$source status=${resolvedState.status.name}, '
-        'active=${resolvedState.shouldGrantAccess}',
+        'source=$source status=${writableState.status.name}, '
+        'active=${writableState.shouldGrantAccess}',
       );
-      return resolvedState;
+      return writableState;
     }
 
     final SubscriptionAccessState? cachedState = _readStoredAccessState();
@@ -631,10 +633,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     if (validationResult?.isValid == true && verifiedItem != null) {
       await _reportTransaction(verifiedItem);
     }
-    await _updateSubscriptionAccessState(verifiedState);
+    final SubscriptionAccessState writableState =
+        _resolveWritableAccessState(verifiedState);
+    await _updateSubscriptionAccessState(writableState);
 
     return SubscriptionVerificationResult(
-      accessState: verifiedState,
+      accessState: writableState,
       resolvedItem: verifiedItem,
     );
   }
@@ -779,6 +783,48 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       'effectiveUntil=${_formatExpiration(state.effectiveUntilMs ?? 0)}, '
       'active=${state.shouldGrantAccess}',
     );
+  }
+
+  SubscriptionAccessState _resolveWritableAccessState(
+    SubscriptionAccessState incomingState,
+  ) {
+    final SubscriptionAccessState? retainedGraceState =
+        _activeGraceStateOrNull(accessState.value) ??
+            _activeGraceStateOrNull(_readStoredAccessState());
+    if (retainedGraceState == null) {
+      return incomingState;
+    }
+
+    if (incomingState.status == SubscriptionAccessStatus.expired &&
+        incomingState.note == 'no active native entitlement') {
+      _log(
+        'Retain grace period access while native entitlements are empty: '
+        'productId=${retainedGraceState.productId}, '
+        'effectiveUntilMs=${retainedGraceState.effectiveUntilMs}',
+      );
+      return retainedGraceState.copyWith(
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        note:
+            'retained active grace period while native entitlements are empty',
+      );
+    }
+
+    return incomingState;
+  }
+
+  SubscriptionAccessState? _activeGraceStateOrNull(
+    SubscriptionAccessState? state,
+  ) {
+    if (state == null || state.status != SubscriptionAccessStatus.gracePeriod) {
+      return null;
+    }
+
+    final int effectiveUntilMs = state.effectiveUntilMs ?? 0;
+    if (effectiveUntilMs <= DateTime.now().millisecondsSinceEpoch) {
+      return null;
+    }
+
+    return state;
   }
 
   void _applyAccessState(SubscriptionAccessState state) {
