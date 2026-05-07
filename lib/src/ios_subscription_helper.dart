@@ -82,21 +82,25 @@ class IosSubscriptionHelper {
     final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
     final RenewalInfoIOS? renewalInfo = subscription.renewalInfoIOS;
     final int? graceUntilMs = renewalInfo?.gracePeriodExpirationDate?.toInt();
-    final SubscriptionAccessStatus status = graceUntilMs != null
+    final bool hasActiveGracePeriod =
+        graceUntilMs != null && graceUntilMs > nowMs;
+    final SubscriptionAccessStatus status = hasActiveGracePeriod
         ? SubscriptionAccessStatus.gracePeriod
-        : SubscriptionAccessStatus.active;
+        : (subscription.isActive
+            ? SubscriptionAccessStatus.active
+            : SubscriptionAccessStatus.expired);
 
     return SubscriptionAccessState(
-      status: subscription.isActive ? status : SubscriptionAccessStatus.expired,
+      status: status,
       evaluatedAtMs: nowMs,
       effectiveUntilMs: graceUntilMs ?? subscription.expirationDateIOS?.toInt(),
       productId: subscription.productId,
       transactionId: subscription.transactionId,
-      note: subscription.isActive
-          ? (status == SubscriptionAccessStatus.gracePeriod
-              ? 'active native entitlement in grace period'
-              : 'active native entitlement')
-          : 'inactive native subscription',
+      note: status == SubscriptionAccessStatus.gracePeriod
+          ? 'native entitlement in grace period'
+          : (status == SubscriptionAccessStatus.active
+              ? 'active native entitlement'
+              : 'inactive native subscription'),
     );
   }
 

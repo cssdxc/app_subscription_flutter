@@ -66,6 +66,26 @@ void main() {
     expect(state.shouldGrantAccess, isFalse);
   });
 
+  test('grants grace period when inactive subscription has valid grace window',
+      () {
+    final SubscriptionAccessState state =
+        IosSubscriptionHelper.resolveAccessStateFromActiveSubscription(
+      subscription: _activeSubscription(
+        isActive: false,
+        renewalInfoIOS: RenewalInfoIOS(
+          gracePeriodExpirationDate: nowMs + 10000,
+          expirationReason: 'BILLING_ERROR',
+          willAutoRenew: true,
+        ),
+      ),
+      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+    );
+
+    expect(state.status, SubscriptionAccessStatus.gracePeriod);
+    expect(state.shouldGrantAccess, isTrue);
+    expect(state.effectiveUntilMs, nowMs + 10000);
+  });
+
   test('blocks when no native entitlement is returned', () {
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
