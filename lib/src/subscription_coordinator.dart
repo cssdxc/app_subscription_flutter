@@ -616,9 +616,6 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     if (verifiedState == null) {
       final SubscriptionAccessState fallbackState =
           await refreshAccessState(source: 'native_status_unavailable');
-      if (validationResult?.isValid == true && verifiedItem != null) {
-        await _reportTransaction(verifiedItem);
-      }
       return SubscriptionVerificationResult(
         accessState: fallbackState,
         resolvedItem: verifiedItem,
@@ -630,8 +627,13 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       'status=${verifiedState.status.name}, active=${verifiedState.shouldGrantAccess}, '
       'tx=${verifiedItem?.transactionIdFor}',
     );
-    if (validationResult?.isValid == true && verifiedItem != null) {
-      await _reportTransaction(verifiedItem);
+    final PurchaseIOS? reportableItem = _resolveReportableTransaction(
+      accessState: verifiedState,
+      verifiedItem: verifiedItem,
+      originalItem: item,
+    );
+    if (reportableItem != null) {
+      await _reportTransaction(reportableItem);
     }
     final SubscriptionAccessState writableState =
         _resolveWritableAccessState(verifiedState);
@@ -767,6 +769,26 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     } catch (e) {
       _log('Send transaction to server error: $e');
     }
+  }
+
+  PurchaseIOS? _resolveReportableTransaction({
+    required SubscriptionAccessState accessState,
+    required PurchaseIOS? verifiedItem,
+    required PurchaseIOS? originalItem,
+  }) {
+    if (!accessState.shouldGrantAccess) {
+      return null;
+    }
+
+    final PurchaseIOS? candidate = _hasTransactionId(verifiedItem)
+        ? verifiedItem
+        : (_hasTransactionId(originalItem) ? originalItem : null);
+    return candidate;
+  }
+
+  bool _hasTransactionId(PurchaseIOS? item) {
+    final String transactionId = item?.transactionId ?? '';
+    return transactionId.isNotEmpty;
   }
 
   Future<void> _updateSubscriptionAccessState(

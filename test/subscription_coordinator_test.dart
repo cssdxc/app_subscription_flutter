@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+const MethodChannel _iapChannel = MethodChannel('flutter_inapp');
 
 ActiveSubscription _activeSubscription({
   String productId = 'subscribe_month_1',
@@ -23,6 +27,7 @@ ActiveSubscription _activeSubscription({
 SubscriptionCoordinator _coordinator({
   required SharedPreferences prefs,
   required ActiveSubscriptionQuery query,
+  SubscriptionTransactionReporter? transactionReporter,
 }) {
   return SubscriptionCoordinator(
     sharedPreferences: prefs,
@@ -34,12 +39,35 @@ SubscriptionCoordinator _coordinator({
         ),
       ],
       activeSubscriptionQuery: query,
+      transactionReporter: transactionReporter,
     ),
+  );
+}
+
+PurchaseIOS _purchase({
+  String productId = 'subscribe_month_1',
+  String? id,
+  String transactionId = 'tx-active',
+  String? originalTransactionId = 'original-tx-active',
+}) {
+  return PurchaseIOS(
+    id: id ?? (transactionId.isNotEmpty ? transactionId : productId),
+    isAutoRenewing: true,
+    platform: IapPlatform.IOS,
+    productId: productId,
+    purchaseState: PurchaseState.Purchased,
+    quantity: 1,
+    store: IapStore.Apple,
+    transactionDate: DateTime.now().millisecondsSinceEpoch.toDouble(),
+    transactionId: transactionId,
+    originalTransactionIdentifierIOS: originalTransactionId,
   );
 }
 
 void main() {
   const String cacheKey = 'subscription_access_state';
+
+  TestWidgetsFlutterBinding.ensureInitialized();
 
   test('refreshAccessState updates accessState from active entitlements',
       () async {
@@ -215,6 +243,7 @@ void main() {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     int queryCalls = 0;
+    final Completer<void> stateCompleter = Completer<void>();
     final SubscriptionCoordinator coordinator = _coordinator(
       prefs: prefs,
       query: (productIds) async {
@@ -224,13 +253,194 @@ void main() {
         ];
       },
     );
+    void onStateChanged() {
+      if (coordinator.accessState.value.status ==
+              SubscriptionAccessStatus.active &&
+          !stateCompleter.isCompleted) {
+        stateCompleter.complete();
+      }
+    }
+
+    coordinator.accessState.addListener(onStateChanged);
+    addTearDown(() => coordinator.accessState.removeListener(onStateChanged));
 
     coordinator.didChangeAppLifecycleState(AppLifecycleState.resumed);
-    await Future<void>.delayed(Duration.zero);
+    await stateCompleter.future;
 
     expect(queryCalls, 1);
     expect(
         coordinator.accessState.value.status, SubscriptionAccessStatus.active);
     expect(coordinator.isSubscribed.value, isTrue);
+  });
+
+  test(
+      'restore reports transaction when native access is active even if local validation is invalid',
+      () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final List<SubscriptionTransactionPayload> reportedPayloads =
+        <SubscriptionTransactionPayload>[];
+    final PurchaseIOS purchase = _purchase(
+      transactionId: 'tx-invalid-validation',
+      originalTransactionId: 'original-invalid-validation',
+    );
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => <ActiveSubscription>[
+        _activeSubscription(transactionId: 'tx-native-active'),
+      ],
+      transactionReporter: (payload) async {
+        reportedPayloads.add(payload);
+      },
+    );
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          return true;
+        case 'restorePurchases':
+          return null;
+        case 'getAvailableItems':
+          return <dynamic>[purchase.toJson()];
+        case 'validateReceiptIOS':
+          return <String, dynamic>{
+            'isValid': false,
+            'latestTransaction': purchase.toJson(),
+          };
+        case 'finishTransaction':
+          return null;
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    final SubscriptionActionResult result =
+        await coordinator.restore(source: 'test');
+
+    expect(result.success, isTrue);
+    expect(reportedPayloads, hasLength(1));
+    expect(
+        reportedPayloads.single.currentTransactionId, 'tx-invalid-validation');
+    expect(reportedPayloads.single.originalTransactionId,
+        'original-invalid-validation');
+  });
+
+  test('restore does not report transaction when no item has transactionId',
+      () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    int reportCalls = 0;
+    final PurchaseIOS purchase = _purchase(
+      id: 'purchase-without-transaction-id',
+      transactionId: '',
+      originalTransactionId: 'original-without-current-tx',
+    );
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => <ActiveSubscription>[
+        _activeSubscription(transactionId: ''),
+      ],
+      transactionReporter: (payload) async {
+        reportCalls++;
+      },
+    );
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          return true;
+        case 'restorePurchases':
+          return null;
+        case 'getAvailableItems':
+          return <dynamic>[purchase.toJson()];
+        case 'validateReceiptIOS':
+          return <String, dynamic>{
+            'isValid': false,
+            'latestTransaction': purchase.toJson(),
+          };
+        case 'finishTransaction':
+          return null;
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    final SubscriptionActionResult result =
+        await coordinator.restore(source: 'test');
+
+    expect(result.success, isTrue);
+    expect(reportCalls, 0);
+  });
+
+  test(
+      'restore does not report transaction when native status is unavailable and only cached access grants entitlement',
+      () async {
+    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      cacheKey: jsonEncode(
+        SubscriptionAccessState(
+          status: SubscriptionAccessStatus.active,
+          evaluatedAtMs: cachedAt,
+          effectiveUntilMs: cachedAt + 10000,
+          productId: 'subscribe_month_1',
+          transactionId: 'tx-cache',
+        ).toJson(),
+      ),
+    });
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    int reportCalls = 0;
+    final PurchaseIOS purchase = _purchase(
+      transactionId: 'tx-native-purchase',
+      originalTransactionId: 'original-native-purchase',
+    );
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => throw Exception('native unavailable'),
+      transactionReporter: (payload) async {
+        reportCalls++;
+      },
+    );
+
+    await coordinator.loadStoredStatus();
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          return true;
+        case 'restorePurchases':
+          return null;
+        case 'getAvailableItems':
+          return <dynamic>[purchase.toJson()];
+        case 'validateReceiptIOS':
+          return <String, dynamic>{
+            'isValid': false,
+            'latestTransaction': purchase.toJson(),
+          };
+        case 'finishTransaction':
+          return null;
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    final SubscriptionActionResult result =
+        await coordinator.restore(source: 'test');
+
+    expect(result.success, isTrue);
+    expect(
+        coordinator.accessState.value.status, SubscriptionAccessStatus.active);
+    expect(reportCalls, 0);
   });
 }
