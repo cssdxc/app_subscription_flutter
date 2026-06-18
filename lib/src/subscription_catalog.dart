@@ -57,12 +57,55 @@ class SubscriptionCatalog {
     final double rawPrice = product.price ?? 0.0;
     final String displayPrice = product.displayPrice;
 
-    String symbol = displayPrice.replaceAll(RegExp(r'[0-9.,，\s]'), '');
-    if (symbol.isEmpty && displayPrice.isNotEmpty) {
-      symbol = displayPrice.substring(0, 1);
+    final double weeklyPrice = rawPrice / 52.0;
+    final String weeklyDisplayPrice =
+        _replaceDisplayPriceAmount(displayPrice, weeklyPrice);
+    return '$weeklyDisplayPrice / $weekLabel';
+  }
+
+  String _replaceDisplayPriceAmount(String displayPrice, double amount) {
+    final RegExp amountPattern = RegExp(r'\d(?:[\d.,，]|\s(?=\d))*');
+    final RegExpMatch? match = amountPattern.firstMatch(displayPrice);
+    if (match == null) {
+      return amount.toStringAsFixed(2);
     }
 
-    final double weeklyPrice = rawPrice / 52.0;
-    return '$symbol${weeklyPrice.toStringAsFixed(2)} / $weekLabel';
+    final String originalAmount = match.group(0)!;
+    final String formattedAmount = _formatAmountLike(originalAmount, amount);
+    return displayPrice.replaceRange(match.start, match.end, formattedAmount);
+  }
+
+  String _formatAmountLike(String originalAmount, double amount) {
+    final String decimalSeparator = _decimalSeparatorOf(originalAmount);
+    final String formatted = amount.toStringAsFixed(2);
+    if (decimalSeparator == ',') {
+      return formatted.replaceAll('.', ',');
+    }
+    return formatted;
+  }
+
+  String _decimalSeparatorOf(String amount) {
+    final int lastDot = amount.lastIndexOf('.');
+    final int lastComma = amount.lastIndexOf(',');
+    final int lastFullWidthComma = amount.lastIndexOf('，');
+    final int lastCommaLike =
+        lastComma > lastFullWidthComma ? lastComma : lastFullWidthComma;
+
+    if (lastCommaLike > lastDot && _digitsAfter(amount, lastCommaLike) == 2) {
+      return ',';
+    }
+    return '.';
+  }
+
+  int _digitsAfter(String value, int index) {
+    int count = 0;
+    for (int i = index + 1; i < value.length; i++) {
+      final int codeUnit = value.codeUnitAt(i);
+      if (codeUnit < 0x30 || codeUnit > 0x39) {
+        continue;
+      }
+      count++;
+    }
+    return count;
   }
 }
