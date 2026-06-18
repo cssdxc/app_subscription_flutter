@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 ProductSubscriptionIOS _product({
   required String displayPrice,
-  required double price,
+  double? price,
 }) {
   return ProductSubscriptionIOS(
     currency: 'USD',
@@ -102,6 +102,32 @@ void main() {
         weekLabel: 'week',
       ),
       '25,00 € / week',
+    );
+  });
+
+  test('uses fallback when raw product price is unavailable', () {
+    expect(
+      catalog.yearlyPricePerWeek(
+        <ProductSubscriptionIOS>[
+          _product(displayPrice: r'$49.99'),
+        ],
+        fallbackPrice: r'$49.99',
+        weekLabel: 'week',
+      ),
+      r'$49.99 / week',
+    );
+  });
+
+  test('uses fallback format when product display price is empty', () {
+    expect(
+      catalog.yearlyPricePerWeek(
+        <ProductSubscriptionIOS>[
+          _product(displayPrice: '', price: 49.99),
+        ],
+        fallbackPrice: '49,99 €',
+        weekLabel: 'week',
+      ),
+      '0,96 € / week',
     );
   });
 }

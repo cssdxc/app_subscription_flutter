@@ -54,10 +54,14 @@ class SubscriptionCatalog {
       return '$fallbackPrice / $weekLabel';
     }
 
-    final double rawPrice = product.price ?? 0.0;
-    final String displayPrice = product.displayPrice;
+    final double? rawPrice = product.price;
+    if (rawPrice == null) {
+      return '$fallbackPrice / $weekLabel';
+    }
 
     final double weeklyPrice = rawPrice / 52.0;
+    final String displayPrice =
+        product.displayPrice.isNotEmpty ? product.displayPrice : fallbackPrice;
     final String weeklyDisplayPrice =
         _replaceDisplayPriceAmount(displayPrice, weeklyPrice);
     return '$weeklyDisplayPrice / $weekLabel';

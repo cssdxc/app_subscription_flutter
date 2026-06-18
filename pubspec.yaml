@@ -1,7 +1,7 @@
 name: app_subscription_core
 description: Shared subscription primitives for Flutter apps using flutter_inapp_purchase.
 publish_to: "none"
-version: 0.1.11
+version: 0.1.12
 
 environment:
   sdk: ">=3.1.0 <4.0.0"
