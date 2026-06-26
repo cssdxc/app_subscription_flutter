@@ -24,7 +24,6 @@ ProductSubscriptionIOS _product({
 void main() {
   const SubscriptionCatalog catalog = SubscriptionCatalog(
     defaultPrices: <String, String>{'yearly': r'$49.99'},
-    yearlyProductId: 'yearly',
   );
 
   test('keeps leading currency symbols when formatting weekly price', () {
@@ -33,6 +32,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: r'$49.99', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -46,6 +46,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: r'US$49.99', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -59,6 +60,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: 'USD 49.99', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -72,6 +74,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: '49,99 €', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -85,6 +88,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: '49.99 USD', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -98,6 +102,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: '1.299,99 €', price: 1299.99),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$1299.99',
         weekLabel: 'week',
       ),
@@ -111,6 +116,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: r'$49.99'),
         ],
+        productId: 'yearly',
         fallbackPrice: r'$49.99',
         weekLabel: 'week',
       ),
@@ -124,6 +130,7 @@ void main() {
         <ProductSubscriptionIOS>[
           _product(displayPrice: '', price: 49.99),
         ],
+        productId: 'yearly',
         fallbackPrice: '49,99 €',
         weekLabel: 'week',
       ),

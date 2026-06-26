@@ -3,11 +3,9 @@ import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 class SubscriptionCatalog {
   const SubscriptionCatalog({
     required this.defaultPrices,
-    this.yearlyProductId,
   });
 
   final Map<String, String> defaultPrices;
-  final String? yearlyProductId;
 
   List<String> get productIds => defaultPrices.keys.toList(growable: false);
 
@@ -40,16 +38,15 @@ class SubscriptionCatalog {
 
   String yearlyPricePerWeek(
     List<ProductSubscriptionIOS> products, {
+    required String productId,
     required String fallbackPrice,
     required String weekLabel,
   }) {
-    final String? targetProductId = yearlyProductId;
-    if (targetProductId == null || targetProductId.isEmpty) {
+    if (productId.isEmpty) {
       return '$fallbackPrice / $weekLabel';
     }
 
-    final ProductSubscriptionIOS? product =
-        findProduct(products, targetProductId);
+    final ProductSubscriptionIOS? product = findProduct(products, productId);
     if (product == null) {
       return '$fallbackPrice / $weekLabel';
     }

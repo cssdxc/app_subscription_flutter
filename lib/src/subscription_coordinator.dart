@@ -72,7 +72,6 @@ class SubscriptionProductConfig {
 class SubscriptionCoordinatorConfig {
   const SubscriptionCoordinatorConfig({
     required this.products,
-    this.yearlyProductId,
     this.accessStateStorageKey,
     this.debugOverride = false,
     this.logger,
@@ -82,7 +81,6 @@ class SubscriptionCoordinatorConfig {
   });
 
   final List<SubscriptionProductConfig> products;
-  final String? yearlyProductId;
   final String? accessStateStorageKey;
   final bool debugOverride;
   final SubscriptionLogger? logger;
@@ -104,7 +102,6 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             for (final product in config.products)
               product.id: product.defaultPrice,
           },
-          yearlyProductId: config.yearlyProductId,
         );
 
   final SharedPreferences sharedPreferences;
@@ -535,11 +532,13 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   }
 
   String yearlyPricePerWeek({
+    required String productId,
     required String fallbackPrice,
     required String weekLabel,
   }) {
     return catalog.yearlyPricePerWeek(
       products.value,
+      productId: productId,
       fallbackPrice: fallbackPrice,
       weekLabel: weekLabel,
     );

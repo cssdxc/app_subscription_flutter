@@ -30,7 +30,6 @@ class ExampleSubscriptionService {
     coordinator = SubscriptionCoordinator(
       sharedPreferences: prefs,
       config: SubscriptionCoordinatorConfig(
-        yearlyProductId: subscribeYear1,
         products: const [
           SubscriptionProductConfig(
             id: 'subscribe_week_1',
