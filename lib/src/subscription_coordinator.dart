@@ -168,17 +168,33 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     if (products.value.isNotEmpty) {
       return;
     }
+    if (productIds.isEmpty) {
+      _log('跳过商品加载：未配置订阅商品');
+      products.value = <ProductSubscriptionIOS>[];
+      hasFreeTrial.value = false;
+      return;
+    }
     final bool connected = await _ensureIapConnection(source: 'load_products');
     if (!connected) {
       _log('跳过商品加载：应用内购买连接暂不可用');
       return;
     }
-    final List<ProductSubscriptionIOS> rawList = await _iap.fetchProducts(
-      skus: productIds,
-      type: ProductQueryType.Subs,
-    );
-    products.value = rawList;
-    await refreshTrialEligibility();
+    try {
+      final List<ProductSubscriptionIOS> rawList = await _iap.fetchProducts(
+        skus: productIds,
+        type: ProductQueryType.Subs,
+      );
+      products.value = rawList;
+      await refreshTrialEligibility();
+    } on PurchaseError catch (e) {
+      _isIapConnected = false;
+      _log('加载订阅商品失败: code=${e.code?.value ?? ''}, message=${e.message}');
+      hasFreeTrial.value = false;
+    } catch (e) {
+      _isIapConnected = false;
+      _log('加载订阅商品异常: $e');
+      hasFreeTrial.value = false;
+    }
   }
 
   Future<void> loadStoredStatus() async {
