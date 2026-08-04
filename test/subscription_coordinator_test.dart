@@ -53,7 +53,6 @@ PurchaseIOS _purchase({
   return PurchaseIOS(
     id: id ?? (transactionId.isNotEmpty ? transactionId : productId),
     isAutoRenewing: true,
-    platform: IapPlatform.IOS,
     productId: productId,
     purchaseState: PurchaseState.Purchased,
     quantity: 1,
@@ -273,9 +272,7 @@ void main() {
     expect(coordinator.isSubscribed.value, isTrue);
   });
 
-  test(
-      'restore reports transaction when native access is active even if local validation is invalid',
-      () async {
+  test('restore reports transaction when native access is active', () async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     final List<SubscriptionTransactionPayload> reportedPayloads =
@@ -299,15 +296,12 @@ void main() {
       switch (call.method) {
         case 'initConnection':
           return true;
-        case 'restorePurchases':
-          return null;
+        case 'syncIOS':
+          return true;
         case 'getAvailableItems':
           return <dynamic>[purchase.toJson()];
-        case 'validateReceiptIOS':
-          return <String, dynamic>{
-            'isValid': false,
-            'latestTransaction': purchase.toJson(),
-          };
+        case 'isTransactionVerifiedIOS':
+          return true;
         case 'finishTransaction':
           return null;
       }
@@ -354,15 +348,12 @@ void main() {
       switch (call.method) {
         case 'initConnection':
           return true;
-        case 'restorePurchases':
-          return null;
+        case 'syncIOS':
+          return true;
         case 'getAvailableItems':
           return <dynamic>[purchase.toJson()];
-        case 'validateReceiptIOS':
-          return <String, dynamic>{
-            'isValid': false,
-            'latestTransaction': purchase.toJson(),
-          };
+        case 'isTransactionVerifiedIOS':
+          return true;
         case 'finishTransaction':
           return null;
       }
@@ -376,7 +367,7 @@ void main() {
     final SubscriptionActionResult result =
         await coordinator.restore(source: 'test');
 
-    expect(result.success, isTrue);
+    expect(result.success, isFalse);
     expect(reportCalls, 0);
   });
 
@@ -416,15 +407,12 @@ void main() {
       switch (call.method) {
         case 'initConnection':
           return true;
-        case 'restorePurchases':
-          return null;
+        case 'syncIOS':
+          return true;
         case 'getAvailableItems':
           return <dynamic>[purchase.toJson()];
-        case 'validateReceiptIOS':
-          return <String, dynamic>{
-            'isValid': false,
-            'latestTransaction': purchase.toJson(),
-          };
+        case 'isTransactionVerifiedIOS':
+          return true;
         case 'finishTransaction':
           return null;
       }
@@ -438,7 +426,7 @@ void main() {
     final SubscriptionActionResult result =
         await coordinator.restore(source: 'test');
 
-    expect(result.success, isTrue);
+    expect(result.success, isFalse);
     expect(
         coordinator.accessState.value.status, SubscriptionAccessStatus.active);
     expect(reportCalls, 0);

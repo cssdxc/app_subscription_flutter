@@ -1,29 +1,6 @@
-import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_access_state.dart';
-
-class SubscriptionVerificationResult {
-  const SubscriptionVerificationResult({
-    required this.accessState,
-    this.resolvedItem,
-  });
-
-  final SubscriptionAccessState accessState;
-  final PurchaseIOS? resolvedItem;
-
-  bool get isActive => accessState.shouldGrantAccess;
-}
-
-class IOSLocalValidationResult {
-  const IOSLocalValidationResult({
-    required this.isValid,
-    this.latestTransaction,
-  });
-
-  final bool isValid;
-  final PurchaseIOS? latestTransaction;
-}
 
 class IosSubscriptionHelper {
   const IosSubscriptionHelper._();
@@ -39,17 +16,12 @@ class IosSubscriptionHelper {
     }
 
     final String fallbackId = item.id.trim();
-    if (fallbackId.isNotEmpty && fallbackId != '0') {
-      return fallbackId;
-    }
-
-    return '';
+    return fallbackId.isNotEmpty && fallbackId != '0' ? fallbackId : '';
   }
 
   static bool shouldProcessPurchaseUpdate(PurchaseIOS item) {
-    final String productId = normalizedProductId(item);
     return item.purchaseState == PurchaseState.Purchased &&
-        productId.isNotEmpty;
+        normalizedProductId(item).isNotEmpty;
   }
 
   static SubscriptionAccessState selectMostRelevantAccessState(
@@ -76,9 +48,8 @@ class IosSubscriptionHelper {
     required ActiveSubscription subscription,
     DateTime? now,
   }) {
-    // Apple currentEntitlements grants auto-renewable subscriptions only when
-    // the renewal state is subscribed or inGracePeriod.
-    // https://developer.apple.com/documentation/storekit/transaction/currententitlements
+    // StoreKit currentEntitlements includes subscriptions in subscribed or
+    // inGracePeriod state.
     final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
     final RenewalInfoIOS? renewalInfo = subscription.renewalInfoIOS;
     final int? graceUntilMs = renewalInfo?.gracePeriodExpirationDate?.toInt();
@@ -119,137 +90,14 @@ class IosSubscriptionHelper {
       );
     }
 
-    final List<SubscriptionAccessState> resolvedStates = subscriptions
-        .map(
-          (subscription) => resolveAccessStateFromActiveSubscription(
-            subscription: subscription,
-            now: now,
-          ),
-        )
-        .toList(growable: false);
-    return selectMostRelevantAccessState(resolvedStates);
-  }
-
-  static Future<IOSLocalValidationResult?> validateReceiptLocally({
-    required MethodChannel channel,
-    required String productId,
-    PurchaseIOS? fallbackItem,
-    void Function(String message)? logger,
-  }) async {
-    try {
-      final Map<dynamic, dynamic>? rawResult = await channel
-          .invokeMethod<Map<dynamic, dynamic>>('validateReceiptIOS', {
-        'apple': {'sku': productId},
-      });
-      if (rawResult == null) {
-        return null;
-      }
-
-      final Map<String, dynamic> result = rawResult.map(
-        (key, value) => MapEntry(key.toString(), value),
-      );
-
-      PurchaseIOS? latestTransaction;
-      final dynamic latestTransactionRaw = result['latestTransaction'];
-      if (latestTransactionRaw is Map) {
-        latestTransaction = parseLatestTransaction(
-          latestTransactionRaw,
-          productId: productId,
-          fallbackItem: fallbackItem,
-          logger: logger,
-        );
-      }
-
-      return IOSLocalValidationResult(
-        isValid: result['isValid'] == true,
-        latestTransaction: latestTransaction,
-      );
-    } on PlatformException catch (e) {
-      logger?.call(
-        'Local iOS receipt validation failed for $productId: '
-        'code=${e.code}, message=${e.message}, details=${e.details}',
-      );
-      return null;
-    } catch (e) {
-      logger?.call('Local iOS receipt validation failed for $productId: $e');
-      return null;
-    }
-  }
-
-  static PurchaseIOS? parseLatestTransaction(
-    Map<dynamic, dynamic> rawTransaction, {
-    required String productId,
-    PurchaseIOS? fallbackItem,
-    void Function(String message)? logger,
-  }) {
-    try {
-      final Map<String, dynamic> tx = rawTransaction.map(
-        (key, value) => MapEntry(key.toString(), value),
-      );
-      tx['__typename'] ??= 'PurchaseIOS';
-      tx['productId'] ??= productId;
-      tx['platform'] ??= fallbackItem?.platform.toJson() ?? 'ios';
-      tx['purchaseState'] ??= fallbackItem?.purchaseState.toJson() ??
-          PurchaseState.Purchased.toJson();
-      tx['isAutoRenewing'] ??= fallbackItem?.isAutoRenewing ?? false;
-      tx['quantity'] ??= fallbackItem?.quantity ?? 1;
-      tx['transactionDate'] ??= fallbackItem?.transactionDate ??
-          DateTime.now().millisecondsSinceEpoch;
-
-      final String transactionId =
-          tx['transactionId']?.toString() ?? tx['id']?.toString() ?? '';
-      if (transactionId.isNotEmpty) {
-        tx['transactionId'] = transactionId;
-        tx['id'] ??= transactionId;
-      }
-
-      tx['originalTransactionIdentifierIOS'] ??=
-          fallbackItem?.originalTransactionIdentifierIOS;
-      tx['originalTransactionDateIOS'] ??=
-          fallbackItem?.originalTransactionDateIOS;
-      tx['expirationDateIOS'] ??= fallbackItem?.expirationDateIOS;
-      tx['revocationDateIOS'] ??= fallbackItem?.revocationDateIOS;
-      tx['subscriptionGroupIdIOS'] ??= fallbackItem?.subscriptionGroupIdIOS;
-      tx['renewalInfoIOS'] ??= fallbackItem?.renewalInfoIOS?.toJson();
-      tx['environmentIOS'] ??= fallbackItem?.environmentIOS;
-      tx['purchaseToken'] ??= fallbackItem?.purchaseToken;
-
-      return PurchaseIOS.fromJson(tx);
-    } catch (e) {
-      logger?.call(
-        'Parse latest iOS transaction failed: $e | raw=$rawTransaction',
-      );
-      return fallbackItem;
-    }
-  }
-
-  static Future<void> finishTransactionSafe({
-    required MethodChannel channel,
-    required Purchase item,
-    required Future<void> Function(Purchase item) fallbackFinish,
-    void Function(String message)? logger,
-  }) async {
-    try {
-      if (item is PurchaseIOS) {
-        final String transactionId = item.transactionIdFor ?? '';
-        if (transactionId.isEmpty || transactionId == '0') {
-          logger?.call(
-            '跳过完成交易：无效的 iOS transactionId, id=${item.id}, tx=$transactionId',
-          );
-          return;
-        }
-        await channel.invokeMethod('finishTransaction', <String, dynamic>{
-          'transactionId': transactionId,
-          'purchase': item.toJson(),
-          'isConsumable': false,
-        });
-        return;
-      }
-
-      await fallbackFinish(item);
-    } catch (e) {
-      logger?.call('完成交易失败: $e');
-    }
+    return selectMostRelevantAccessState(
+      subscriptions.map(
+        (subscription) => resolveAccessStateFromActiveSubscription(
+          subscription: subscription,
+          now: now,
+        ),
+      ),
+    );
   }
 
   static Future<bool> computeTrialEligibility({
@@ -258,45 +106,40 @@ class IosSubscriptionHelper {
     required List<String> subscriptionProductIds,
     void Function(String message)? logger,
   }) async {
-    final bool productHasFreeTrial = products.any(
-      (product) =>
-          product.subscriptionInfoIOS?.introductoryOffer?.paymentMode ==
-          PaymentModeIOS.FreeTrial,
-    );
+    final List<ProductSubscriptionIOS> productsWithTrial = products
+        .where(
+          (product) =>
+              product.introductoryPricePaymentModeIOS ==
+                  PaymentModeIOS.FreeTrial ||
+              (product.subscriptionOffers ?? const <SubscriptionOffer>[]).any(
+                (offer) => offer.paymentMode == PaymentMode.FreeTrial,
+              ),
+        )
+        .toList(growable: false);
+    final bool productHasFreeTrial = productsWithTrial.isNotEmpty;
 
     String? groupId;
-    for (final product in products) {
-      if (product.subscriptionInfoIOS?.introductoryOffer?.paymentMode ==
-          PaymentModeIOS.FreeTrial) {
-        final String? candidateGroupId =
-            product.subscriptionInfoIOS?.subscriptionGroupId;
-        if ((candidateGroupId ?? '').isNotEmpty) {
-          groupId = candidateGroupId;
-          break;
-        }
+    for (final ProductSubscriptionIOS product in productsWithTrial) {
+      if ((product.subscriptionGroupIdIOS ?? '').isNotEmpty) {
+        groupId = product.subscriptionGroupIdIOS;
+        break;
       }
     }
 
     if ((groupId ?? '').isNotEmpty) {
       final bool eligible = await iap.isEligibleForIntroOfferIOS(groupId!);
       logger?.call(
-        '免费试用资格(StoreKit2): ${productHasFreeTrial && eligible} | 产品含试用: $productHasFreeTrial | groupId: $groupId | eligible: $eligible',
+        'App Store free trial eligible: ${productHasFreeTrial && eligible}',
       );
       return productHasFreeTrial && eligible;
     }
 
     final List<Purchase> items = await iap.getAvailablePurchases();
-    final bool userHasSubscriptionHistory = items.any((item) {
-      if (item is! PurchaseIOS) {
-        return false;
-      }
-      final String productId = normalizedProductId(item);
-      return productId.isNotEmpty && subscriptionProductIds.contains(productId);
-    });
+    final bool userHasSubscriptionHistory = items.whereType<PurchaseIOS>().any(
+          (item) => subscriptionProductIds.contains(normalizedProductId(item)),
+        );
     final bool eligible = productHasFreeTrial && !userHasSubscriptionHistory;
-    logger?.call(
-      '免费试用资格(回退): $eligible | 产品含试用: $productHasFreeTrial | 有订阅历史: $userHasSubscriptionHistory',
-    );
+    logger?.call('App Store free trial eligible from history: $eligible');
     return eligible;
   }
 

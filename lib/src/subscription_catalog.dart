@@ -13,8 +13,8 @@ class SubscriptionCatalog {
     return defaultPrices[productId] ?? '';
   }
 
-  ProductSubscriptionIOS? findProduct(
-    List<ProductSubscriptionIOS> products,
+  ProductSubscription? findProduct(
+    List<ProductSubscription> products,
     String productId,
   ) {
     for (final product in products) {
@@ -26,18 +26,18 @@ class SubscriptionCatalog {
   }
 
   String findDisplayPrice(
-    List<ProductSubscriptionIOS> products,
+    List<ProductSubscription> products,
     String productId,
     String fallbackPrice,
   ) {
-    final ProductSubscriptionIOS? product = findProduct(products, productId);
+    final ProductSubscription? product = findProduct(products, productId);
     final String displayPrice =
         product?.displayPrice ?? findDefaultPrice(productId);
     return displayPrice.isNotEmpty ? displayPrice : fallbackPrice;
   }
 
   String yearlyPricePerWeek(
-    List<ProductSubscriptionIOS> products, {
+    List<ProductSubscription> products, {
     required String productId,
     required String fallbackPrice,
     required String weekLabel,
@@ -46,7 +46,7 @@ class SubscriptionCatalog {
       return '$fallbackPrice / $weekLabel';
     }
 
-    final ProductSubscriptionIOS? product = findProduct(products, productId);
+    final ProductSubscription? product = findProduct(products, productId);
     if (product == null) {
       return '$fallbackPrice / $weekLabel';
     }

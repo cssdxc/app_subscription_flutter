@@ -1,6 +1,5 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_service_example.dart';
 
@@ -16,7 +15,7 @@ class ExampleSubscriptionUiDelegate {
   final ExampleSubscriptionService subscriptionService;
 
   Future<SubscriptionActionResult> purchase({
-    required ProductSubscriptionIOS? product,
+    required ProductSubscription? product,
     required String source,
   }) async {
     debugPrint('[SubscriptionUI] loading');

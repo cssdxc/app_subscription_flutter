@@ -1,16 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'ios_subscription_helper.dart';
 import 'subscription_access_state.dart';
 import 'subscription_action_result.dart';
 import 'subscription_catalog.dart';
+import 'subscription_store_adapter.dart';
+import 'subscription_transaction.dart';
 
 typedef SubscriptionLogger = void Function(String message);
 typedef SubscriptionTransactionReporter = Future<void> Function(
@@ -21,20 +20,6 @@ typedef SubscriptionActionObserver = void Function(
 typedef ActiveSubscriptionQuery = Future<List<ActiveSubscription>> Function(
   List<String>? productIds,
 );
-
-class SubscriptionTransactionPayload {
-  const SubscriptionTransactionPayload({
-    required this.productId,
-    required this.originalTransactionId,
-    required this.currentTransactionId,
-    this.purchase,
-  });
-
-  final String productId;
-  final String originalTransactionId;
-  final String currentTransactionId;
-  final PurchaseIOS? purchase;
-}
 
 enum SubscriptionActionPhase {
   started,
@@ -74,6 +59,7 @@ class SubscriptionCoordinatorConfig {
     required this.products,
     this.accessStateStorageKey,
     this.debugOverride = false,
+    this.googlePlayLicenseKeyAndroid = '',
     this.logger,
     this.transactionReporter,
     this.actionObserver,
@@ -83,6 +69,7 @@ class SubscriptionCoordinatorConfig {
   final List<SubscriptionProductConfig> products;
   final String? accessStateStorageKey;
   final bool debugOverride;
+  final String googlePlayLicenseKeyAndroid;
   final SubscriptionLogger? logger;
   final SubscriptionTransactionReporter? transactionReporter;
   final SubscriptionActionObserver? actionObserver;
@@ -94,9 +81,13 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     required this.sharedPreferences,
     required this.config,
     FlutterInappPurchase? iap,
-    MethodChannel? channel,
+    SubscriptionStoreAdapter? storeAdapter,
   })  : _iap = iap ?? FlutterInappPurchase.instance,
-        _channel = channel ?? const MethodChannel('flutter_inapp'),
+        _storeAdapter = storeAdapter ??
+            SubscriptionStoreAdapter.forIap(
+              iap ?? FlutterInappPurchase.instance,
+              googlePlayLicenseKeyAndroid: config.googlePlayLicenseKeyAndroid,
+            ),
         catalog = SubscriptionCatalog(
           defaultPrices: {
             for (final product in config.products)
@@ -107,7 +98,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   final SharedPreferences sharedPreferences;
   final SubscriptionCoordinatorConfig config;
   final FlutterInappPurchase _iap;
-  final MethodChannel _channel;
+  final SubscriptionStoreAdapter _storeAdapter;
   final SubscriptionCatalog catalog;
 
   final ValueNotifier<bool> isSubscribed = ValueNotifier<bool>(false);
@@ -120,12 +111,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       note: 'not evaluated',
     ),
   );
-  final ValueNotifier<List<ProductSubscriptionIOS>> products =
-      ValueNotifier<List<ProductSubscriptionIOS>>(<ProductSubscriptionIOS>[]);
+  final ValueNotifier<List<ProductSubscription>> products =
+      ValueNotifier<List<ProductSubscription>>(<ProductSubscription>[]);
 
   final Completer<void> _readyCompleter = Completer<void>();
 
-  StreamSubscription<Purchase?>? _purchaseUpdatedSubscription;
+  StreamSubscription<Purchase>? _purchaseUpdatedSubscription;
   StreamSubscription<PurchaseError>? _purchaseErrorSubscription;
 
   _PendingPurchaseAction? _pendingPurchaseAction;
@@ -170,7 +161,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
     if (productIds.isEmpty) {
       _log('跳过商品加载：未配置订阅商品');
-      products.value = <ProductSubscriptionIOS>[];
+      products.value = <ProductSubscription>[];
       hasFreeTrial.value = false;
       return;
     }
@@ -180,7 +171,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       return;
     }
     try {
-      final List<ProductSubscriptionIOS> rawList = await _iap.fetchProducts(
+      final List<ProductSubscription> rawList =
+          await _iap.fetchProducts<ProductSubscription>(
         skus: productIds,
         type: ProductQueryType.Subs,
       );
@@ -240,21 +232,38 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     final List<ActiveSubscription>? subscriptions =
         await _queryActiveSubscriptions();
     if (subscriptions != null) {
-      final SubscriptionAccessState resolvedState =
-          IosSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-        subscriptions,
-        fallbackProductId: productIds.join(','),
-        now: DateTime.now(),
-      );
-      final SubscriptionAccessState writableState =
-          _resolveWritableAccessState(resolvedState);
-      await _updateSubscriptionAccessState(writableState);
-      _log(
-        'refresh subscription access from native entitlements: '
-        'source=$source status=${writableState.status.name}, '
-        'active=${writableState.shouldGrantAccess}',
-      );
-      return writableState;
+      try {
+        final SubscriptionAccessState resolvedState =
+            await _storeAdapter.resolveVerifiedAccessState(
+          iap: _iap,
+          subscriptions: subscriptions,
+          productIds: productIds,
+          fallbackProductId: productIds.join(','),
+          now: DateTime.now(),
+        );
+        final SubscriptionAccessState writableState =
+            _resolveWritableAccessState(resolvedState);
+        await _updateSubscriptionAccessState(writableState);
+        _log(
+          'refresh subscription access from locally verified entitlements: '
+          'source=$source status=${writableState.status.name}, '
+          'active=${writableState.shouldGrantAccess}',
+        );
+        return writableState;
+      } on SubscriptionStoreException catch (error) {
+        final SubscriptionAccessState unavailableState =
+            SubscriptionAccessState(
+          status: SubscriptionAccessStatus.unavailable,
+          evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+          productId: productIds.join(','),
+          note: error.code,
+        );
+        await _updateSubscriptionAccessState(unavailableState);
+        _log('Local subscription verification failed: ${error.code}');
+        return unavailableState;
+      } catch (error) {
+        _log('Local subscription verification unavailable: $error');
+      }
     }
 
     final SubscriptionAccessState? cachedState = _readStoredAccessState();
@@ -284,10 +293,10 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
   Future<void> refreshTrialEligibility() async {
     try {
-      hasFreeTrial.value = await IosSubscriptionHelper.computeTrialEligibility(
+      hasFreeTrial.value = await _storeAdapter.computeTrialEligibility(
         iap: _iap,
         products: products.value,
-        subscriptionProductIds: productIds,
+        productIds: productIds,
         logger: _log,
       );
     } catch (e) {
@@ -297,8 +306,9 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   }
 
   Future<SubscriptionActionResult> purchase(
-    ProductSubscriptionIOS? product, {
+    ProductSubscription? product, {
     required String source,
+    SubscriptionPurchaseOptions options = const SubscriptionPurchaseOptions(),
   }) async {
     if (product == null) {
       await loadProducts();
@@ -306,6 +316,17 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         type: SubscriptionActionType.purchase,
         code: 'product-not-found',
         message: 'Subscription product is unavailable.',
+      );
+      _notifyFinished(source, result);
+      return result;
+    }
+
+    if (!_storeAdapter.supportsProduct(product)) {
+      final SubscriptionActionResult result = SubscriptionActionResult.failure(
+        type: SubscriptionActionType.purchase,
+        productId: product.id,
+        code: 'invalid-product-platform',
+        message: 'The subscription product belongs to another store.',
       );
       _notifyFinished(source, result);
       return result;
@@ -348,23 +369,31 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             SubscriptionActionResult.failure(
           type: SubscriptionActionType.purchase,
           productId: product.id,
-          code: 'storekit-unavailable',
-          message: 'StoreKit is unavailable. Check network permission.',
+          code: 'store-unavailable',
+          message: 'The app store connection is unavailable.',
         );
         _notifyFinished(source, result);
         return result;
       }
       _listenToPurchaseEvents();
-      await _iap.requestPurchaseWithBuilder(
-        build: (builder) {
-          builder
-            ..type = ProductQueryType.Subs
-            ..android.skus = [product.id]
-            ..ios.sku = product.id;
-        },
+      await _storeAdapter.requestPurchase(
+        iap: _iap,
+        product: product,
+        options: options,
       );
       _log('购买请求已发送');
       final SubscriptionActionResult result = await completer.future;
+      _notifyFinished(source, result);
+      return result;
+    } on SubscriptionStoreException catch (e) {
+      _isBuying = false;
+      _pendingPurchaseAction = null;
+      final SubscriptionActionResult result = SubscriptionActionResult.failure(
+        type: SubscriptionActionType.purchase,
+        productId: product.id,
+        code: e.code,
+        message: e.message,
+      );
       _notifyFinished(source, result);
       return result;
     } on PurchaseError catch (e) {
@@ -434,17 +463,14 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             : SubscriptionActionResult.failure(
                 type: SubscriptionActionType.restore,
                 silent: silent,
-                code: 'storekit-unavailable',
-                message: 'StoreKit is unavailable. Check network permission.',
+                code: 'store-unavailable',
+                message: 'The app store connection is unavailable.',
               );
         _notifyFinished(source, result, silent: silent);
         return result;
       }
       _listenToPurchaseEvents();
-      if (Platform.isIOS) {
-        await _iap.restorePurchases();
-      }
-      final List<Purchase> items = await _iap.getAvailablePurchases();
+      final List<Purchase> items = await _storeAdapter.restorePurchases(_iap);
       if (items.isEmpty) {
         final SubscriptionAccessState refreshedState =
             await refreshAccessState(source: source);
@@ -470,9 +496,10 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       }
 
       int restoredCount = 0;
-      PurchaseIOS? latestSuccessPurchase;
+      Purchase? latestSuccessPurchase;
+      SubscriptionActionResult? processingFailure;
       for (final item in items) {
-        if (item is! PurchaseIOS) {
+        if (!_storeAdapter.supportsPurchase(item)) {
           continue;
         }
         final SubscriptionActionResult result = await _handlePurchasedItem(
@@ -484,33 +511,44 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         if (result.success) {
           restoredCount++;
           latestSuccessPurchase = result.purchase;
+        } else {
+          processingFailure ??= result;
         }
+      }
+      if (restoredCount > 0) {
+        await refreshAccessState(source: '${source}_final');
       }
       await refreshTrialEligibility();
 
-      final SubscriptionActionResult finalResult = restoredCount == 0
-          ? (accessState.value.shouldGrantAccess
-              ? SubscriptionActionResult.success(
-                  type: SubscriptionActionType.restore,
-                  silent: silent,
-                  productId: accessState.value.productId,
-                  message: 'Subscription status is active.',
-                )
-              : SubscriptionActionResult.failure(
-                  type: SubscriptionActionType.restore,
-                  silent: silent,
-                  code: 'restore-inactive',
-                  message:
-                      'Restorable purchases were found, but none are currently active.',
-                ))
-          : SubscriptionActionResult.success(
-              type: SubscriptionActionType.restore,
-              silent: silent,
-              productId: IosSubscriptionHelper.normalizedProductId(
-                  latestSuccessPurchase),
-              purchase: latestSuccessPurchase,
-              restoredCount: restoredCount,
-            );
+      late final SubscriptionActionResult finalResult;
+      if (restoredCount > 0 && accessState.value.shouldGrantAccess) {
+        finalResult = SubscriptionActionResult.success(
+          type: SubscriptionActionType.restore,
+          silent: silent,
+          productId: latestSuccessPurchase == null
+              ? null
+              : _storeAdapter.normalizedProductId(latestSuccessPurchase),
+          purchase: latestSuccessPurchase,
+          restoredCount: restoredCount,
+        );
+      } else if (processingFailure != null) {
+        finalResult = processingFailure;
+      } else if (accessState.value.shouldGrantAccess) {
+        finalResult = SubscriptionActionResult.success(
+          type: SubscriptionActionType.restore,
+          silent: silent,
+          productId: accessState.value.productId,
+          message: 'Subscription status is active.',
+        );
+      } else {
+        finalResult = SubscriptionActionResult.failure(
+          type: SubscriptionActionType.restore,
+          silent: silent,
+          code: 'restore-inactive',
+          message:
+              'Restorable purchases were found, but none are currently active.',
+        );
+      }
       _notifyFinished(source, finalResult, silent: silent);
       return finalResult;
     } catch (e) {
@@ -543,8 +581,31 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     return catalog.findDefaultPrice(productId);
   }
 
-  ProductSubscriptionIOS? findProduct(String productId) {
+  ProductSubscription? findProduct(String productId) {
     return catalog.findProduct(products.value, productId);
+  }
+
+  List<SubscriptionOffer> findOffers(String productId) {
+    final ProductSubscription? product = findProduct(productId);
+    if (product == null) {
+      return const <SubscriptionOffer>[];
+    }
+    return _storeAdapter.offersFor(product);
+  }
+
+  SubscriptionOffer? findOffer(
+    String productId, {
+    String? offerId,
+    String? basePlanIdAndroid,
+  }) {
+    final List<SubscriptionOffer> matches =
+        findOffers(productId).where((offer) {
+      final bool matchesOffer = offerId == null || offer.id == offerId;
+      final bool matchesBasePlan = basePlanIdAndroid == null ||
+          offer.basePlanIdAndroid == basePlanIdAndroid;
+      return matchesOffer && matchesBasePlan;
+    }).toList(growable: false);
+    return matches.length == 1 ? matches.single : null;
   }
 
   String yearlyPricePerWeek({
@@ -566,7 +627,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     await _purchaseUpdatedSubscription?.cancel();
     await _purchaseErrorSubscription?.cancel();
     try {
-      _iap.endConnection();
+      await _iap.endConnection();
     } catch (_) {}
     isSubscribed.dispose();
     hasFreeTrial.dispose();
@@ -582,96 +643,115 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     unawaited(_refreshAccessStateAfterForeground());
   }
 
-  Future<SubscriptionVerificationResult> _verifyCurrentSubscriptionByItem({
-    PurchaseIOS? item,
+  Future<_SubscriptionVerificationResult> _verifyCurrentSubscriptionByItem({
+    required Purchase item,
   }) async {
-    final String productId = IosSubscriptionHelper.normalizedProductId(item);
+    final String productId = _storeAdapter.normalizedProductId(item);
+    final SubscriptionTransactionPayload payload =
+        _storeAdapter.transactionPayload(item);
     if (productId.isEmpty || !productIds.contains(productId)) {
       _log(
-        'Skip verifying purchase with invalid productId: rawId=${item?.id}, productId=${item?.productId}',
+        'Skip verifying purchase with invalid productId: rawId=${item.id}, productId=${item.productId}',
       );
       final SubscriptionAccessState invalidState = SubscriptionAccessState(
         status: SubscriptionAccessStatus.unavailable,
         evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
         productId: productId,
-        transactionId: item?.transactionIdFor ?? '',
+        transactionId: payload.currentTransactionId,
         note: 'invalid productId',
       );
       await _updateSubscriptionAccessState(invalidState);
-      return SubscriptionVerificationResult(accessState: invalidState);
+      return _SubscriptionVerificationResult(
+        item: item,
+        verified: false,
+      );
     }
 
-    PurchaseIOS? verifiedItem = item;
-    final IOSLocalValidationResult? validationResult =
-        await IosSubscriptionHelper.validateReceiptLocally(
-      channel: _channel,
-      productId: productId,
-      fallbackItem: item,
-      logger: _log,
-    );
-    if (validationResult == null) {
-      _log(
-          'Local receipt validation unavailable for $productId, using native status');
-    } else if (!validationResult.isValid) {
-      _log(
-          'Local receipt validation failed for $productId, using native status');
-    }
-
-    if (validationResult != null &&
-        validationResult.latestTransaction != null) {
-      verifiedItem = validationResult.latestTransaction;
+    try {
+      await _storeAdapter.verifyPurchaseLocally(iap: _iap, purchase: item);
+    } on SubscriptionStoreException catch (error) {
+      final SubscriptionAccessState rejectedState = SubscriptionAccessState(
+        status: error.code == 'missing-license-key'
+            ? SubscriptionAccessStatus.unavailable
+            : SubscriptionAccessStatus.revoked,
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        productId: productId,
+        transactionId: payload.currentTransactionId,
+        note: error.code,
+      );
+      await _updateSubscriptionAccessState(rejectedState);
+      rethrow;
     }
 
     final SubscriptionAccessState? verifiedState =
         await _resolveAccessStateFromNativeStatus(
       productId: productId,
-      fallbackTransactionId: verifiedItem?.transactionIdFor ?? '',
+      fallbackTransactionId: payload.currentTransactionId,
     );
 
     if (verifiedState == null) {
-      final SubscriptionAccessState fallbackState =
-          await refreshAccessState(source: 'native_status_unavailable');
-      return SubscriptionVerificationResult(
-        accessState: fallbackState,
-        resolvedItem: verifiedItem,
+      await refreshAccessState(source: 'native_status_unavailable');
+      return _SubscriptionVerificationResult(
+        item: item,
+        verified: false,
       );
     }
 
     _log(
       'Native status resolved for $productId: '
-      'status=${verifiedState.status.name}, active=${verifiedState.shouldGrantAccess}, '
-      'tx=${verifiedItem?.transactionIdFor}',
+      'status=${verifiedState.status.name}, active=${verifiedState.shouldGrantAccess}',
     );
-    final PurchaseIOS? reportableItem = _resolveReportableTransaction(
-      accessState: verifiedState,
-      verifiedItem: verifiedItem,
-      originalItem: item,
-    );
-    if (reportableItem != null) {
-      await _reportTransaction(reportableItem);
+    if (verifiedState.shouldGrantAccess && _hasTransactionIdentity(payload)) {
+      await _reportTransaction(payload);
     }
     final SubscriptionAccessState writableState =
         _resolveWritableAccessState(verifiedState);
     await _updateSubscriptionAccessState(writableState);
 
-    return SubscriptionVerificationResult(
-      accessState: writableState,
-      resolvedItem: verifiedItem,
+    return _SubscriptionVerificationResult(
+      item: item,
+      verified: writableState.shouldGrantAccess,
     );
   }
 
   Future<SubscriptionActionResult> _handlePurchasedItem(
-    PurchaseIOS item, {
+    Purchase item, {
     required SubscriptionActionType actionType,
     required String source,
     bool silent = false,
   }) async {
-    if (!IosSubscriptionHelper.shouldProcessPurchaseUpdate(item)) {
+    final String productId = _storeAdapter.normalizedProductId(item);
+    if (_storeAdapter.isPending(item)) {
+      _log('购买仍在等待付款确认: productId=$productId');
+      return SubscriptionActionResult.failure(
+        type: actionType,
+        silent: silent,
+        productId: productId,
+        code: 'purchase-pending',
+        message: 'The purchase is pending payment confirmation.',
+        pending: true,
+        purchase: item,
+      );
+    }
+    final SubscriptionAccessState? blockingState =
+        _storeAdapter.blockingAccessState(item);
+    if (blockingState != null) {
+      await _updateSubscriptionAccessState(blockingState);
+      return SubscriptionActionResult.failure(
+        type: actionType,
+        silent: silent,
+        productId: productId,
+        code: 'billing-retry',
+        message: 'The subscription payment requires attention.',
+        purchase: item,
+      );
+    }
+    if (!_storeAdapter.shouldProcessPurchaseUpdate(item)) {
       _log('忽略不需要处理的购买项: state=${item.purchaseState}');
       return SubscriptionActionResult.failure(
         type: actionType,
         silent: silent,
-        productId: IosSubscriptionHelper.normalizedProductId(item),
+        productId: productId,
         code: 'ignored-state',
         message: 'Purchase state is not eligible for processing.',
         purchase: item,
@@ -682,7 +762,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       return SubscriptionActionResult.failure(
         type: actionType,
         silent: silent,
-        productId: IosSubscriptionHelper.normalizedProductId(item),
+        productId: productId,
         code: 'busy',
         message: 'Another purchase flow is in progress.',
         purchase: item,
@@ -691,9 +771,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
     _isProcessingPurchase = true;
     try {
-      final String productId = IosSubscriptionHelper.normalizedProductId(item);
       _log(
-        '处理购买更新: 产品ID: $productId, rawId=${item.id}, tx=${item.transactionIdFor}',
+        '处理购买更新: productId=$productId, rawId=${item.id}',
       );
       if (productId.isEmpty || !productIds.contains(productId)) {
         _log('忽略未知 SKU 的购买更新: rawId=${item.id}, productId=${item.productId}');
@@ -707,21 +786,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         );
       }
 
-      final SubscriptionVerificationResult verificationResult =
+      final _SubscriptionVerificationResult verificationResult =
           await _verifyCurrentSubscriptionByItem(item: item);
-      final bool verificationSuccess = verificationResult.isActive;
-      final PurchaseIOS purchaseToFinish =
-          verificationResult.resolvedItem ?? item;
+      final bool verificationSuccess = verificationResult.verified;
+      final Purchase purchaseToFinish = verificationResult.item;
       _isBuying = false;
-
-      await IosSubscriptionHelper.finishTransactionSafe(
-        channel: _channel,
-        item: purchaseToFinish,
-        fallbackFinish: (purchase) =>
-            _iap.finishTransaction(purchase: purchase),
-        logger: _log,
-      );
-      await refreshTrialEligibility();
 
       if (!verificationSuccess) {
         return SubscriptionActionResult.failure(
@@ -729,10 +798,16 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           silent: silent,
           productId: productId,
           code: 'validation-failed',
-          message: 'Subscription is not active after local validation.',
+          message: 'Subscription verification did not confirm active access.',
           purchase: purchaseToFinish,
         );
       }
+
+      await _storeAdapter.finishTransaction(
+        iap: _iap,
+        purchase: purchaseToFinish,
+      );
+      await refreshTrialEligibility();
 
       return SubscriptionActionResult.success(
         type: actionType,
@@ -741,12 +816,22 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         purchase: purchaseToFinish,
         message: source,
       );
+    } on SubscriptionStoreException catch (e) {
+      _log('处理购买项失败: code=${e.code}, message=${e.message}');
+      return SubscriptionActionResult.failure(
+        type: actionType,
+        silent: silent,
+        productId: productId,
+        code: e.code,
+        message: e.message,
+        purchase: item,
+      );
     } catch (e) {
       _log('处理购买项异常: $e');
       return SubscriptionActionResult.failure(
         type: actionType,
         silent: silent,
-        productId: IosSubscriptionHelper.normalizedProductId(item),
+        productId: productId,
         code: 'processing-exception',
         message: e.toString(),
         purchase: item,
@@ -756,54 +841,26 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _reportTransaction(PurchaseIOS? item) async {
+  Future<void> _reportTransaction(
+    SubscriptionTransactionPayload payload,
+  ) async {
     final SubscriptionTransactionReporter? reporter =
         config.transactionReporter;
     if (reporter == null) {
       return;
     }
 
-    final String productId = IosSubscriptionHelper.normalizedProductId(item);
-    final String originalTransactionId =
-        item?.originalTransactionIdentifierIOS ?? '';
-    final String currentTransactionId = item?.transactionIdFor ?? '';
-    if (originalTransactionId.isEmpty && currentTransactionId.isEmpty) {
-      _log('Skip sending transaction: missing transaction identifiers');
-      return;
-    }
-
     try {
-      await reporter(
-        SubscriptionTransactionPayload(
-          productId: productId,
-          originalTransactionId: originalTransactionId,
-          currentTransactionId: currentTransactionId,
-          purchase: item,
-        ),
-      );
+      await reporter(payload);
     } catch (e) {
       _log('Send transaction to server error: $e');
     }
   }
 
-  PurchaseIOS? _resolveReportableTransaction({
-    required SubscriptionAccessState accessState,
-    required PurchaseIOS? verifiedItem,
-    required PurchaseIOS? originalItem,
-  }) {
-    if (!accessState.shouldGrantAccess) {
-      return null;
-    }
-
-    final PurchaseIOS? candidate = _hasTransactionId(verifiedItem)
-        ? verifiedItem
-        : (_hasTransactionId(originalItem) ? originalItem : null);
-    return candidate;
-  }
-
-  bool _hasTransactionId(PurchaseIOS? item) {
-    final String transactionId = item?.transactionId ?? '';
-    return transactionId.isNotEmpty;
+  bool _hasTransactionIdentity(SubscriptionTransactionPayload payload) {
+    return payload.currentTransactionId.isNotEmpty ||
+        payload.originalTransactionId.isNotEmpty ||
+        (payload.purchaseToken ?? '').isNotEmpty;
   }
 
   Future<void> _updateSubscriptionAccessState(
@@ -913,7 +970,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
   static const Duration _cachedAccessStateTtl = Duration(hours: 6);
 
-  bool get _hasInFlightOperation => _isProcessingPurchase || _isBuying;
+  bool get _hasInFlightOperation =>
+      _isProcessingPurchase || _isBuying || _isRestoring;
 
   void _registerLifecycleObserver() {
     if (_isLifecycleObserverRegistered) {
@@ -965,18 +1023,14 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
   void _listenToPurchaseEvents() {
     _purchaseUpdatedSubscription ??=
-        _iap.purchaseUpdated.listen((Purchase? purchase) async {
-      if (purchase == null || purchase is! PurchaseIOS) {
+        _iap.purchaseUpdatedListener.listen((Purchase purchase) async {
+      if (!_storeAdapter.supportsPurchase(purchase)) {
         return;
       }
 
       _log(
-        '收到购买更新: state=${purchase.purchaseState}, id=${purchase.id}, tx=${purchase.transactionIdFor}',
+        '收到购买更新: state=${purchase.purchaseState}, id=${purchase.id}',
       );
-      if (!IosSubscriptionHelper.shouldProcessPurchaseUpdate(purchase)) {
-        _log('跳过非完成态购买更新: state=${purchase.purchaseState}');
-        return;
-      }
       if (_isRestoring) {
         _log('恢复购买进行中，忽略 purchaseUpdated 里的重复恢复事件');
         return;
@@ -986,23 +1040,46 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         return;
       }
 
-      final SubscriptionActionType actionType = _pendingPurchaseAction != null
+      final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
+      final bool matchesPendingPurchase = pendingAction != null &&
+          pendingAction.productId ==
+              _storeAdapter.normalizedProductId(purchase);
+      if (pendingAction != null && !matchesPendingPurchase) {
+        _log('忽略与当前购买商品不匹配的购买更新');
+        return;
+      }
+      final SubscriptionActionType actionType = matchesPendingPurchase
           ? SubscriptionActionType.purchase
           : SubscriptionActionType.sync;
       final SubscriptionActionResult result = await _handlePurchasedItem(
         purchase,
         actionType: actionType,
-        source: _pendingPurchaseAction?.source ?? 'purchase_update',
+        source:
+            matchesPendingPurchase ? pendingAction.source : 'purchase_update',
       );
-      _completePendingPurchaseAction(result);
+      if (matchesPendingPurchase) {
+        _isBuying = false;
+        _completePendingPurchaseAction(result);
+      }
     });
 
     _purchaseErrorSubscription ??=
         _iap.purchaseErrorListener.listen((PurchaseError event) {
       final String errorCode = event.code?.value ?? '';
       _log('购买错误: code=$errorCode, message=${event.message}');
-      _isBuying = false;
       final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
+      final String errorProductId = event.productId ?? '';
+      final List<String> errorProductIds = event.productIds ?? const <String>[];
+      final bool identifiesAnotherProduct = pendingAction != null &&
+          (errorProductId.isNotEmpty || errorProductIds.isNotEmpty) &&
+          errorProductId != pendingAction.productId &&
+          !errorProductIds.contains(pendingAction.productId);
+      if (identifiesAnotherProduct) {
+        _log('忽略与当前购买商品不匹配的购买错误');
+        return;
+      }
+
+      _isBuying = false;
       if (pendingAction != null && !pendingAction.completer.isCompleted) {
         final SubscriptionActionResult result =
             SubscriptionActionResult.failure(
@@ -1013,7 +1090,6 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           cancelled: event.code == ErrorCode.UserCancelled,
         );
         pendingAction.completer.complete(result);
-        _notifyFinished(pendingAction.source, result);
       }
       _pendingPurchaseAction = null;
     });
@@ -1075,8 +1151,10 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         .where((subscription) => subscription.productId == productId)
         .toList(growable: false);
     final SubscriptionAccessState state =
-        IosSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-      matchingSubscriptions,
+        await _storeAdapter.resolveVerifiedAccessState(
+      iap: _iap,
+      subscriptions: matchingSubscriptions,
+      productIds: <String>[productId],
       fallbackProductId: productId,
       now: DateTime.now(),
     );
@@ -1132,6 +1210,16 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   void _log(String message) {
     config.logger?.call(message);
   }
+}
+
+class _SubscriptionVerificationResult {
+  const _SubscriptionVerificationResult({
+    required this.item,
+    required this.verified,
+  });
+
+  final Purchase item;
+  final bool verified;
 }
 
 class _PendingPurchaseAction {

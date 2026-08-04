@@ -12,6 +12,7 @@ class SubscriptionActionResult {
     required this.success,
     this.silent = false,
     this.cancelled = false,
+    this.pending = false,
     this.productId,
     this.code,
     this.message,
@@ -23,10 +24,11 @@ class SubscriptionActionResult {
   final bool success;
   final bool silent;
   final bool cancelled;
+  final bool pending;
   final String? productId;
   final String? code;
   final String? message;
-  final PurchaseIOS? purchase;
+  final Purchase? purchase;
   final int restoredCount;
 
   bool get failed => !success;
@@ -35,7 +37,7 @@ class SubscriptionActionResult {
     required SubscriptionActionType type,
     bool silent = false,
     String? productId,
-    PurchaseIOS? purchase,
+    Purchase? purchase,
     int restoredCount = 0,
     String? message,
   }) {
@@ -57,7 +59,8 @@ class SubscriptionActionResult {
     String? code,
     String? message,
     bool cancelled = false,
-    PurchaseIOS? purchase,
+    bool pending = false,
+    Purchase? purchase,
     int restoredCount = 0,
   }) {
     return SubscriptionActionResult(
@@ -65,6 +68,7 @@ class SubscriptionActionResult {
       success: false,
       silent: silent,
       cancelled: cancelled,
+      pending: pending,
       productId: productId,
       code: code,
       message: message,

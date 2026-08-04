@@ -1,9 +1,12 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ExampleSubscriptionService {
+  ExampleSubscriptionService({this.googlePlayLicenseKeyAndroid = ''});
+
+  final String googlePlayLicenseKeyAndroid;
+
   final ValueNotifier<bool> hasFreeTrial = ValueNotifier<bool>(true);
   final ValueNotifier<SubscriptionAccessState> accessState =
       ValueNotifier<SubscriptionAccessState>(
@@ -13,8 +16,8 @@ class ExampleSubscriptionService {
       note: 'not evaluated',
     ),
   );
-  final ValueNotifier<List<ProductSubscriptionIOS>> products =
-      ValueNotifier<List<ProductSubscriptionIOS>>(<ProductSubscriptionIOS>[]);
+  final ValueNotifier<List<ProductSubscription>> products =
+      ValueNotifier<List<ProductSubscription>>(<ProductSubscription>[]);
 
   late final SubscriptionCoordinator coordinator;
 
@@ -44,6 +47,7 @@ class ExampleSubscriptionService {
             defaultPrice: '\$49.99',
           ),
         ],
+        googlePlayLicenseKeyAndroid: googlePlayLicenseKeyAndroid,
         logger: _log,
         transactionReporter: _reportTransaction,
       ),
@@ -64,7 +68,7 @@ class ExampleSubscriptionService {
 
   Future<void> loadProducts() => coordinator.loadProducts();
 
-  ProductSubscriptionIOS? findProduct(String productId) {
+  ProductSubscription? findProduct(String productId) {
     return coordinator.findProduct(productId);
   }
 
@@ -87,7 +91,7 @@ class ExampleSubscriptionService {
   }
 
   Future<SubscriptionActionResult> purchaseSubscription(
-    ProductSubscriptionIOS? product, {
+    ProductSubscription? product, {
     required String source,
   }) {
     return coordinator.purchase(product, source: source);
@@ -118,6 +122,6 @@ class ExampleSubscriptionService {
 
   Future<void> _reportTransaction(
       SubscriptionTransactionPayload payload) async {
-    // Call your backend here.
+    // Optional transaction recording or audit hook.
   }
 }
