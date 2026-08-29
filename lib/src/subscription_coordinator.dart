@@ -146,7 +146,10 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       }
 
       _listenToPurchaseEvents();
-      await restore(source: 'bootstrap', silent: true);
+      // StoreKit sync can present an Apple ID sign-in sheet. Startup only
+      // needs the locally available entitlement state; explicit restore()
+      // remains the user-initiated path that may synchronize the App Store.
+      await refreshAccessState(source: 'bootstrap');
       await loadProducts();
     } finally {
       if (!_readyCompleter.isCompleted) {

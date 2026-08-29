@@ -272,6 +272,40 @@ void main() {
     expect(coordinator.isSubscribed.value, isTrue);
   });
 
+  test('initialization does not synchronize the App Store', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    int syncCalls = 0;
+    final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
+      sharedPreferences: prefs,
+      config: SubscriptionCoordinatorConfig(
+        products: const <SubscriptionProductConfig>[],
+        activeSubscriptionQuery: (productIds) async => <ActiveSubscription>[],
+      ),
+    );
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          return true;
+        case 'syncIOS':
+          syncCalls++;
+          return true;
+      }
+      return null;
+    });
+    addTearDown(() async {
+      await coordinator.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    await coordinator.init();
+
+    expect(syncCalls, 0);
+  });
+
   test('restore reports transaction when native access is active', () async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
     final SharedPreferences prefs = await SharedPreferences.getInstance();
