@@ -155,8 +155,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
-  Future<void> loadProducts() async {
-    if (products.value.isNotEmpty) {
+  Future<void> loadProducts({bool force = false}) async {
+    if (!force && products.value.isNotEmpty) {
       return;
     }
     if (productIds.isEmpty) {
@@ -180,10 +180,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       await refreshTrialEligibility();
     } on PurchaseError catch (e) {
       _isIapConnected = false;
+      await _invalidateIapConnection(reason: 'load_products_error');
       _log('加载订阅商品失败: code=${e.code?.value ?? ''}, message=${e.message}');
       hasFreeTrial.value = false;
     } catch (e) {
       _isIapConnected = false;
+      await _invalidateIapConnection(reason: 'load_products_exception');
       _log('加载订阅商品异常: $e');
       hasFreeTrial.value = false;
     }
@@ -386,6 +388,9 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       _notifyFinished(source, result);
       return result;
     } on SubscriptionStoreException catch (e) {
+      if (_isConnectionErrorCode(e.code)) {
+        await _invalidateIapConnection(reason: e.code);
+      }
       _isBuying = false;
       _pendingPurchaseAction = null;
       final SubscriptionActionResult result = SubscriptionActionResult.failure(
@@ -398,6 +403,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       return result;
     } on PurchaseError catch (e) {
       _log('发起购买返回错误: code=${e.code?.value ?? ''}, message=${e.message}');
+      if (_isConnectionError(e)) {
+        await _invalidateIapConnection(
+          reason: e.code?.value ?? 'purchase_error',
+        );
+      }
       _isBuying = false;
       _pendingPurchaseAction = null;
       final SubscriptionActionResult result = SubscriptionActionResult.failure(
@@ -411,6 +421,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       return result;
     } catch (e) {
       _log('发起购买异常: $e');
+      await _invalidateIapConnection(reason: 'purchase_exception');
       _isBuying = false;
       _pendingPurchaseAction = null;
       final SubscriptionActionResult result = SubscriptionActionResult.failure(
@@ -683,11 +694,22 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       rethrow;
     }
 
-    final SubscriptionAccessState? verifiedState =
-        await _resolveAccessStateFromNativeStatus(
-      productId: productId,
-      fallbackTransactionId: payload.currentTransactionId,
-    );
+    SubscriptionAccessState? verifiedState;
+    final bool retryAndroidEntitlementQuery = item is PurchaseAndroid;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      verifiedState = await _resolveAccessStateFromNativeStatus(
+        productId: productId,
+        fallbackTransactionId: payload.currentTransactionId,
+      );
+      final bool shouldRetry = retryAndroidEntitlementQuery &&
+          (verifiedState == null ||
+              (verifiedState.status == SubscriptionAccessStatus.expired &&
+                  verifiedState.note == 'no active Google Play subscription'));
+      if (!shouldRetry || attempt == 2) {
+        break;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    }
 
     if (verifiedState == null) {
       await refreshAccessState(source: 'native_status_unavailable');
@@ -1021,6 +1043,39 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _invalidateIapConnection({required String reason}) async {
+    _isIapConnected = false;
+    _log('使应用内购买连接失效: reason=$reason');
+    try {
+      await _iap.endConnection();
+    } catch (error) {
+      _log('关闭失效的应用内购买连接失败: $error');
+    }
+  }
+
+  bool _isConnectionError(PurchaseError error) {
+    final ErrorCode? code = error.code;
+    return code == ErrorCode.Unknown ||
+        code == ErrorCode.NotPrepared ||
+        code == ErrorCode.ServiceDisconnected ||
+        code == ErrorCode.ServiceTimeout ||
+        code == ErrorCode.ConnectionClosed ||
+        code == ErrorCode.BillingUnavailable ||
+        code == ErrorCode.IapNotAvailable ||
+        code == ErrorCode.ActivityUnavailable;
+  }
+
+  bool _isConnectionErrorCode(String code) {
+    return code == ErrorCode.NotPrepared.value ||
+        code == ErrorCode.ServiceDisconnected.value ||
+        code == ErrorCode.ServiceTimeout.value ||
+        code == ErrorCode.ConnectionClosed.value ||
+        code == ErrorCode.BillingUnavailable.value ||
+        code == ErrorCode.IapNotAvailable.value ||
+        code == ErrorCode.ActivityUnavailable.value ||
+        code == 'store-unavailable';
+  }
+
   void _listenToPurchaseEvents() {
     _purchaseUpdatedSubscription ??=
         _iap.purchaseUpdatedListener.listen((Purchase purchase) async {
@@ -1077,6 +1132,14 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       if (identifiesAnotherProduct) {
         _log('忽略与当前购买商品不匹配的购买错误');
         return;
+      }
+
+      if (_isConnectionError(event)) {
+        unawaited(
+          _invalidateIapConnection(
+            reason: errorCode.isEmpty ? 'purchase_error' : errorCode,
+          ),
+        );
       }
 
       _isBuying = false;

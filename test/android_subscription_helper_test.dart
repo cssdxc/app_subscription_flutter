@@ -493,6 +493,68 @@ void main() {
     );
   });
 
+  test('reconnects after a purchase request reports a disconnected service',
+      () async {
+    final FlutterInappPurchase iap = FlutterInappPurchase(
+      platform: FakePlatform(operatingSystem: Platform.android),
+    );
+    final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
+      _offer(id: 'base', token: 'base-token'),
+    ]);
+    int initCalls = 0;
+    int requestCalls = 0;
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          initCalls++;
+          return true;
+        case 'requestPurchase':
+          requestCalls++;
+          throw PlatformException(code: 'E_SERVICE_DISCONNECTED');
+        case 'endConnection':
+          return true;
+      }
+      return null;
+    });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
+      sharedPreferences: prefs,
+      iap: iap,
+      storeAdapter:
+          const GooglePlaySubscriptionAdapter(licenseKey: _licenseKey),
+      config: const SubscriptionCoordinatorConfig(
+        products: <SubscriptionProductConfig>[
+          SubscriptionProductConfig(
+            id: 'subscribe_month_1',
+            defaultPrice: r'$9.99',
+          ),
+        ],
+      ),
+    );
+    addTearDown(coordinator.dispose);
+
+    final SubscriptionActionResult first = await coordinator.purchase(
+      product,
+      source: 'first',
+    );
+    final SubscriptionActionResult second = await coordinator.purchase(
+      product,
+      source: 'second',
+    );
+
+    expect(first.success, isFalse);
+    expect(second.success, isFalse);
+    expect(requestCalls, 2);
+    expect(initCalls, 2);
+  });
+
   test('active entitlement wins over a later suspended restore item', () async {
     final SubscriptionCoordinator coordinator = await _androidCoordinator();
     addTearDown(coordinator.dispose);
