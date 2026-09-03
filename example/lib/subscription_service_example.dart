@@ -125,13 +125,6 @@ class ExampleSubscriptionService {
     return coordinator.restore(source: source);
   }
 
-  /// 静默恢复已有购买。
-  Future<SubscriptionActionResult> restorePurchasesSilently({
-    String source = 'silent_restore',
-  }) {
-    return coordinator.restoreSilently(source: source);
-  }
-
   /// 释放示例服务和订阅协调器资源。
   Future<void> dispose() async {
     hasFreeTrial.dispose();

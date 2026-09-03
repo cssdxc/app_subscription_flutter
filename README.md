@@ -46,7 +46,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: main
+      ref: v0.2.3
 ```
 
 正式项目建议固定到明确 tag。
@@ -207,14 +207,15 @@ final result = await subscriptionCoordinator.restore(
 iOS 会先触发 App Store sync，再查询当前购买。Android 不存在独立的“恢复”弹窗，
 会直接查询当前订阅，并包含 suspended purchase 以便正确阻断权益。
 
-静默恢复：
+如果用户主动点击恢复按钮，但宿主不希望展示自己的操作提示，可以使用静默结果模式：
 
 ```dart
-await subscriptionCoordinator.restoreSilently(source: 'app_bootstrap');
+await subscriptionCoordinator.restoreSilently(source: 'settings_restore');
 ```
 
 `restoreSilently` 只表示宿主不主动展示操作提示，不会跳过 iOS 的 App Store sync。
-因此它仍应只用于用户明确触发的恢复流程；启动和前台刷新使用本机权益查询，不调用恢复。
+它仍可能触发 Apple ID 登录弹窗，因此不能用于启动或后台自动恢复；启动和前台刷新使用本机
+权益查询，不调用恢复。
 
 ## 生命周期与缓存
 
