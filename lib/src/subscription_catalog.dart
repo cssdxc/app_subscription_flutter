@@ -1,18 +1,24 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+/// 管理订阅商品查找和价格展示规则。
 class SubscriptionCatalog {
+  /// 使用配置价格创建商品目录。
   const SubscriptionCatalog({
     required this.defaultPrices,
   });
 
+  /// 商店价格不可用时使用的默认展示价格。
   final Map<String, String> defaultPrices;
 
+  /// 已配置的全部订阅商品标识。
   List<String> get productIds => defaultPrices.keys.toList(growable: false);
 
+  /// 查找指定商品的默认展示价格。
   String findDefaultPrice(String productId) {
     return defaultPrices[productId] ?? '';
   }
 
+  /// 从已加载商品中查找指定商品。
   ProductSubscription? findProduct(
     List<ProductSubscription> products,
     String productId,
@@ -25,6 +31,7 @@ class SubscriptionCatalog {
     return null;
   }
 
+  /// 优先返回商店展示价格，缺失时依次使用配置价格和调用方兜底价格。
   String findDisplayPrice(
     List<ProductSubscription> products,
     String productId,
@@ -36,6 +43,7 @@ class SubscriptionCatalog {
     return displayPrice.isNotEmpty ? displayPrice : fallbackPrice;
   }
 
+  /// 将年订阅价格换算为每周展示价格。
   String yearlyPricePerWeek(
     List<ProductSubscription> products, {
     required String productId,

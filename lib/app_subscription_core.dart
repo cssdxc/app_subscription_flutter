@@ -1,3 +1,4 @@
+// 统一导出订阅业务 API 及宿主应用需要使用的商店类型。
 export 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart'
     show IapStore, ProductSubscription, Purchase, SubscriptionOffer;
 

@@ -28,6 +28,8 @@ SubscriptionCoordinator _coordinator({
   required SharedPreferences prefs,
   required ActiveSubscriptionQuery query,
   SubscriptionTransactionReporter? transactionReporter,
+  SubscriptionStatusQueryIOS? subscriptionStatusQueryIOS,
+  String storeKitState = 'subscribed',
 }) {
   return SubscriptionCoordinator(
     sharedPreferences: prefs,
@@ -39,6 +41,10 @@ SubscriptionCoordinator _coordinator({
         ),
       ],
       activeSubscriptionQuery: query,
+      subscriptionStatusQueryIOS: subscriptionStatusQueryIOS ??
+          (_) async => <SubscriptionStatusIOS>[
+                SubscriptionStatusIOS(state: storeKitState),
+              ],
       transactionReporter: transactionReporter,
     ),
   );
@@ -137,6 +143,7 @@ void main() {
     final SubscriptionCoordinator coordinator = _coordinator(
       prefs: prefs,
       query: (productIds) async => <ActiveSubscription>[],
+      storeKitState: 'expired',
     );
 
     final SubscriptionAccessState resolvedState =
@@ -146,8 +153,7 @@ void main() {
     expect(coordinator.isSubscribed.value, isFalse);
   });
 
-  test('retains active grace period when native entitlements are empty',
-      () async {
+  test('Apple 过期状态会覆盖本地缓存的宽限期', () async {
     final int cachedAt = DateTime.now().millisecondsSinceEpoch;
     SharedPreferences.setMockInitialValues(<String, Object>{
       cacheKey: jsonEncode(
@@ -164,21 +170,19 @@ void main() {
     final SubscriptionCoordinator coordinator = _coordinator(
       prefs: prefs,
       query: (productIds) async => <ActiveSubscription>[],
+      storeKitState: 'expired',
     );
 
     await coordinator.loadStoredStatus();
     final SubscriptionAccessState resolvedState =
         await coordinator.refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.gracePeriod);
-    expect(resolvedState.shouldGrantAccess, isTrue);
-    expect(resolvedState.effectiveUntilMs, cachedAt + 10000);
-    expect(coordinator.isSubscribed.value, isTrue);
+    expect(resolvedState.status, SubscriptionAccessStatus.expired);
+    expect(resolvedState.shouldGrantAccess, isFalse);
+    expect(coordinator.isSubscribed.value, isFalse);
   });
 
-  test(
-      'does not retain expired grace period when native entitlements are empty',
-      () async {
+  test('Apple 宽限期状态缺少已验证当前权益时不放行', () async {
     final int cachedAt = DateTime.now().millisecondsSinceEpoch;
     SharedPreferences.setMockInitialValues(<String, Object>{
       cacheKey: jsonEncode(
@@ -195,13 +199,14 @@ void main() {
     final SubscriptionCoordinator coordinator = _coordinator(
       prefs: prefs,
       query: (productIds) async => <ActiveSubscription>[],
+      storeKitState: 'inGracePeriod',
     );
 
     await coordinator.loadStoredStatus();
     final SubscriptionAccessState resolvedState =
         await coordinator.refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.expired);
+    expect(resolvedState.status, SubscriptionAccessStatus.unavailable);
     expect(resolvedState.shouldGrantAccess, isFalse);
     expect(coordinator.isSubscribed.value, isFalse);
   });
@@ -270,6 +275,42 @@ void main() {
     expect(
         coordinator.accessState.value.status, SubscriptionAccessStatus.active);
     expect(coordinator.isSubscribed.value, isTrue);
+  });
+
+  test('initialization does not synchronize the App Store', () async {
+    SharedPreferences.setMockInitialValues(<String, Object>{});
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    int syncCalls = 0;
+    final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
+      sharedPreferences: prefs,
+      config: SubscriptionCoordinatorConfig(
+        products: const <SubscriptionProductConfig>[],
+        activeSubscriptionQuery: (productIds) async => <ActiveSubscription>[],
+      ),
+    );
+
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+      switch (call.method) {
+        case 'initConnection':
+          return true;
+        case 'syncIOS':
+          syncCalls++;
+          return true;
+        case 'getAvailableItems':
+          return <dynamic>[];
+      }
+      return null;
+    });
+    addTearDown(() async {
+      await coordinator.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
+
+    await coordinator.init();
+
+    expect(syncCalls, 0);
   });
 
   test('restore reports transaction when native access is active', () async {

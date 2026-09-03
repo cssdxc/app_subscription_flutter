@@ -20,11 +20,12 @@ UI、文案、路由、埋点和订阅失效后的业务处理仍由宿主工程
 当前版本使用：
 
 - Dart 3.2+
-- `flutter_inapp_purchase 10.0.1`
-- `openiap-google 3.0.1`
+- `flutter_inapp_purchase 10.6.0`
+- `openiap-apple 3.4.0`
+- `openiap-google 3.5.0`
 - Google Play Billing Library `9.1.0`
 
-`openiap-google 3.0.1` 的 Maven POM 直接依赖
+`openiap-google 3.5.0` 直接依赖
 `com.android.billingclient:billing:9.1.0`。截至 2026-08-04，Google Maven
 元数据中的最新稳定版也是 `9.1.0`。项目不再额外覆盖 Billing Library
 版本，避免插件与宿主使用两份不一致的版本事实源。
@@ -87,8 +88,9 @@ Future<void> setupSubscription() async {
 `googlePlayLicenseKeyAndroid` 是 Play Console 提供的 Base64 编码 RSA 公钥。
 Android 在本地使用 BillingClient 返回的原始购买数据和签名进行
 RSASSA-PKCS1-v1_5 校验；key、原始数据或签名缺失以及校验失败时均不会授予权益，
-也不会 acknowledge。iOS 使用 StoreKit 2 的已验证 transaction/current
-entitlements。两端都不依赖后端验证回调。
+也不会 acknowledge。iOS 使用 StoreKit 2 的已验证 current entitlements 确认交易
+真实性，并使用 `subscriptionStatusIOS` 获取 Apple 维护的订阅生命周期状态。两端都不
+依赖后端验证回调。
 
 Google 官方仍建议将购买验证迁移到可信后端。本 package 按当前项目要求采用
 client-only 模式，因此无法抵御已完全控制客户端进程的攻击，也无法在 App 未启动时
@@ -116,6 +118,16 @@ Android 端遵循以下规则：
 - grace period 中 Google Play 仍会返回当前购买，因此继续放行。
 - suspended/account hold 不放行，并映射为 `billingRetry` 或失效状态。
 - 新购通过验证后才 acknowledge；确认失败会返回失败，不能视为购买成功。
+
+iOS 端遵循以下规则：
+
+- `subscribed` 映射为 `active`，`inGracePeriod` 映射为 `gracePeriod`，两者继续放行。
+- `inBillingRetryPeriod`、`expired` 和 `revoked` 均不放行。
+- 可放行状态必须同时存在 StoreKit 已验证的 current entitlement。
+- 状态查询按 `subscriptionGroupIdIOS` 去重，同一订阅组只查询一个代表商品。
+- `expirationDateIOS` 和 `gracePeriodExpirationDate` 只用于展示与审计，不参与权益判断。
+- 未知状态或某个订阅组查询失败时，该组返回 `unavailable`；只有其他订阅组没有可放行状态时，
+  整体才会保持不可用，不会把失败误判为过期或有效。
 
 client-only 模式会在启动、恢复和回到前台时重新查询商店状态。App 未运行期间的
 退款或撤销只能在下次商店查询时生效；若未来需要实时处理，应改用 RTDN 和
@@ -201,10 +213,13 @@ iOS 会先触发 App Store sync，再查询当前购买。Android 不存在独�
 await subscriptionCoordinator.restoreSilently(source: 'app_bootstrap');
 ```
 
+`restoreSilently` 只表示宿主不主动展示操作提示，不会跳过 iOS 的 App Store sync。
+因此它仍应只用于用户明确触发的恢复流程；启动和前台刷新使用本机权益查询，不调用恢复。
+
 ## 生命周期与缓存
 
-`init()` 会读取 6 小时内的本地权益快照、连接商店、注册购买监听、静默恢复、加载
-商品，并监听 App 前后台状态。App 回到前台时重新连接并查询当前权益。
+`init()` 会读取 6 小时内的本地权益快照、连接商店、注册购买监听、加载商品并查询本机
+当前权益，不执行 App Store sync。App 回到前台时重新连接并查询当前权益。
 
 商店查询失败时仅在 6 小时内使用最后一次已验证快照；缓存不存在或过期时返回
 `unavailable`。不要直接用本地时间、Android purchase token、iOS expiration date
@@ -216,7 +231,10 @@ await subscriptionCoordinator.restoreSilently(source: 'app_bootstrap');
 await subscriptionCoordinator.dispose();
 ```
 
-## 官方 Android 文档
+## 官方文档
+
+- [Apple StoreKit 订阅状态](https://developer.apple.com/documentation/storekit/product/subscriptioninfo/status)
+- [App Store Connect Billing Grace Period](https://developer.apple.com/help/app-store-connect/manage-subscriptions/enable-billing-grace-period-for-auto-renewable-subscriptions/)
 
 - [Google Play Billing 集成](https://developer.android.com/google/play/billing/integrate)
 - [防范欺诈和滥用](https://developer.android.com/google/play/billing/security)

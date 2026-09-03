@@ -11,22 +11,35 @@ import 'subscription_catalog.dart';
 import 'subscription_store_adapter.dart';
 import 'subscription_transaction.dart';
 
+/// 接收订阅模块诊断日志。
 typedef SubscriptionLogger = void Function(String message);
+
+/// 接收通过验证且已获得权益的交易载荷。
 typedef SubscriptionTransactionReporter = Future<void> Function(
   SubscriptionTransactionPayload payload,
 );
+
+/// 观察购买、恢复和同步操作的开始与结束事件。
 typedef SubscriptionActionObserver = void Function(
     SubscriptionActionEvent event);
+
+/// 查询指定商品对应的当前订阅；主要用于测试或替换默认商店查询。
 typedef ActiveSubscriptionQuery = Future<List<ActiveSubscription>> Function(
   List<String>? productIds,
 );
 
+/// 订阅操作事件所处的阶段。
 enum SubscriptionActionPhase {
+  /// 操作已经开始。
   started,
+
+  /// 操作已经结束。
   finished,
 }
 
+/// 提供给宿主应用埋点或加载态管理的订阅操作事件。
 class SubscriptionActionEvent {
+  /// 创建一个订阅操作生命周期事件。
   const SubscriptionActionEvent({
     required this.phase,
     required this.type,
@@ -36,25 +49,43 @@ class SubscriptionActionEvent {
     this.result,
   });
 
+  /// 当前事件阶段。
   final SubscriptionActionPhase phase;
+
+  /// 当前操作类型。
   final SubscriptionActionType type;
+
+  /// 调用方传入的操作来源标识。
   final String source;
+
+  /// 是否为静默操作。
   final bool silent;
+
+  /// 操作关联的商品标识。
   final String? productId;
+
+  /// 结束事件对应的操作结果；开始事件为空。
   final SubscriptionActionResult? result;
 }
 
+/// 单个订阅商品的静态配置。
 class SubscriptionProductConfig {
+  /// 创建单个订阅商品配置。
   const SubscriptionProductConfig({
     required this.id,
     required this.defaultPrice,
   });
 
+  /// App Store Connect 或 Play Console 中配置的商品标识。
   final String id;
+
+  /// 商店价格暂不可用时使用的展示价格。
   final String defaultPrice;
 }
 
+/// 订阅协调器的商品、验证和回调配置。
 class SubscriptionCoordinatorConfig {
+  /// 创建订阅协调器配置。
   const SubscriptionCoordinatorConfig({
     required this.products,
     this.accessStateStorageKey,
@@ -64,19 +95,40 @@ class SubscriptionCoordinatorConfig {
     this.transactionReporter,
     this.actionObserver,
     this.activeSubscriptionQuery,
+    this.subscriptionStatusQueryIOS,
   });
 
+  /// 应用支持的订阅商品集合。
   final List<SubscriptionProductConfig> products;
+
+  /// 权益快照在 SharedPreferences 中的自定义存储键。
   final String? accessStateStorageKey;
+
+  /// 是否在调试环境中强制授予订阅权益。
   final bool debugOverride;
+
+  /// Play Console 提供的 Base64 编码 RSA 公钥。
   final String googlePlayLicenseKeyAndroid;
+
+  /// 可选的诊断日志回调。
   final SubscriptionLogger? logger;
+
+  /// 可选的已验证交易回传回调。
   final SubscriptionTransactionReporter? transactionReporter;
+
+  /// 可选的订阅操作生命周期观察器。
   final SubscriptionActionObserver? actionObserver;
+
+  /// 可选的当前订阅查询替身；未提供时直接查询商店。
   final ActiveSubscriptionQuery? activeSubscriptionQuery;
+
+  /// 可选的 StoreKit 2 订阅状态查询替身；未提供时直接调用插件。
+  final SubscriptionStatusQueryIOS? subscriptionStatusQueryIOS;
 }
 
+/// 编排商品加载、购买、恢复、验证、权益缓存和前台刷新。
 class SubscriptionCoordinator with WidgetsBindingObserver {
+  /// 创建订阅协调器，并根据当前平台选择默认商店适配器。
   SubscriptionCoordinator({
     required this.sharedPreferences,
     required this.config,
@@ -87,6 +139,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             SubscriptionStoreAdapter.forIap(
               iap ?? FlutterInappPurchase.instance,
               googlePlayLicenseKeyAndroid: config.googlePlayLicenseKeyAndroid,
+              subscriptionStatusQueryIOS: config.subscriptionStatusQueryIOS,
             ),
         catalog = SubscriptionCatalog(
           defaultPrices: {
@@ -95,14 +148,24 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           },
         );
 
+  /// 权益快照使用的持久化存储。
   final SharedPreferences sharedPreferences;
+
+  /// 当前协调器配置。
   final SubscriptionCoordinatorConfig config;
   final FlutterInappPurchase _iap;
   final SubscriptionStoreAdapter _storeAdapter;
+
+  /// 商品查找和价格展示规则。
   final SubscriptionCatalog catalog;
 
+  /// 兼容旧调用方的订阅权益布尔值。
   final ValueNotifier<bool> isSubscribed = ValueNotifier<bool>(false);
+
+  /// 当前商品集合是否包含可用的免费试用。
   final ValueNotifier<bool> hasFreeTrial = ValueNotifier<bool>(true);
+
+  /// 当前统一订阅权益状态。
   final ValueNotifier<SubscriptionAccessState> accessState =
       ValueNotifier<SubscriptionAccessState>(
     const SubscriptionAccessState(
@@ -111,6 +174,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       note: 'not evaluated',
     ),
   );
+
+  /// 从商店加载的订阅商品。
   final ValueNotifier<List<ProductSubscription>> products =
       ValueNotifier<List<ProductSubscription>>(<ProductSubscription>[]);
 
@@ -129,11 +194,17 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   bool _isDisposed = false;
   Future<bool>? _iapConnectionFuture;
 
+  /// 在初始化流程结束时完成，无论商店当前是否可用。
   Future<void> get ready => _readyCompleter.future;
+
+  /// 初始化流程是否已经结束。
   bool get isReady => _readyCompleter.isCompleted;
+
+  /// 配置中的全部订阅商品标识。
   List<String> get productIds =>
       config.products.map((product) => product.id).toList(growable: false);
 
+  /// 初始化缓存、生命周期监听、商店连接、商品列表和本机权益查询。
   Future<void> init() async {
     try {
       await loadStoredStatus();
@@ -146,8 +217,10 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       }
 
       _listenToPurchaseEvents();
-      await restore(source: 'bootstrap', silent: true);
       await loadProducts();
+      // 启动只查询设备上已有的 StoreKit 权益，不执行 App Store sync。
+      // sync 可能弹出 Apple ID 登录界面，仅由用户主动恢复时触发。
+      await refreshAccessState(source: 'bootstrap');
     } finally {
       if (!_readyCompleter.isCompleted) {
         _readyCompleter.complete();
@@ -155,6 +228,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  /// 从商店加载订阅商品；[force] 为真时忽略内存缓存。
   Future<void> loadProducts({bool force = false}) async {
     if (!force && products.value.isNotEmpty) {
       return;
@@ -191,6 +265,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  /// 从本地快照恢复最近一次可用的权益状态。
   Future<void> loadStoredStatus() async {
     if (config.debugOverride) {
       _applyAccessState(
@@ -218,6 +293,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     );
   }
 
+  /// 查询商店并刷新统一权益状态。
   Future<SubscriptionAccessState> refreshAccessState({
     String source = 'manual_refresh',
   }) async {
@@ -239,19 +315,18 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             await _storeAdapter.resolveVerifiedAccessState(
           iap: _iap,
           subscriptions: subscriptions,
+          products: products.value,
           productIds: productIds,
           fallbackProductId: productIds.join(','),
           now: DateTime.now(),
         );
-        final SubscriptionAccessState writableState =
-            _resolveWritableAccessState(resolvedState);
-        await _updateSubscriptionAccessState(writableState);
+        await _updateSubscriptionAccessState(resolvedState);
         _log(
           'refresh subscription access from locally verified entitlements: '
-          'source=$source status=${writableState.status.name}, '
-          'active=${writableState.shouldGrantAccess}',
+          'source=$source status=${resolvedState.status.name}, '
+          'active=${resolvedState.shouldGrantAccess}',
         );
-        return writableState;
+        return resolvedState;
       } on SubscriptionStoreException catch (error) {
         final SubscriptionAccessState unavailableState =
             SubscriptionAccessState(
@@ -293,6 +368,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     return unavailableState;
   }
 
+  /// 根据商店商品与账户状态刷新免费试用资格。
   Future<void> refreshTrialEligibility() async {
     try {
       hasFreeTrial.value = await _storeAdapter.computeTrialEligibility(
@@ -307,6 +383,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  /// 购买指定订阅商品，并等待购买事件给出最终结果。
   Future<SubscriptionActionResult> purchase(
     ProductSubscription? product, {
     required String source,
@@ -435,6 +512,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  /// 恢复购买并重新计算当前订阅权益。
   Future<SubscriptionActionResult> restore({
     String source = 'manual_restore',
     bool silent = false,
@@ -578,24 +656,29 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     }
   }
 
+  /// 静默执行恢复流程；iOS 仍可能因 App Store sync 弹出系统登录界面。
   Future<SubscriptionActionResult> restoreSilently({
     String source = 'silent_restore',
   }) {
     return restore(source: source, silent: true);
   }
 
+  /// 返回商品的商店展示价格，缺失时使用调用方兜底价格。
   String findPrice(String productId, String fallbackPrice) {
     return catalog.findDisplayPrice(products.value, productId, fallbackPrice);
   }
 
+  /// 返回商品配置中的默认展示价格。
   String findDefaultPrice(String productId) {
     return catalog.findDefaultPrice(productId);
   }
 
+  /// 从已加载商品中查找指定订阅。
   ProductSubscription? findProduct(String productId) {
     return catalog.findProduct(products.value, productId);
   }
 
+  /// 返回指定商品在当前商店可购买的全部 offer。
   List<SubscriptionOffer> findOffers(String productId) {
     final ProductSubscription? product = findProduct(productId);
     if (product == null) {
@@ -604,6 +687,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     return _storeAdapter.offersFor(product);
   }
 
+  /// 按 offer 或 base plan 标识查找唯一匹配项。
   SubscriptionOffer? findOffer(
     String productId, {
     String? offerId,
@@ -619,6 +703,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     return matches.length == 1 ? matches.single : null;
   }
 
+  /// 将年订阅价格换算为每周展示价格。
   String yearlyPricePerWeek({
     required String productId,
     required String fallbackPrice,
@@ -632,6 +717,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     );
   }
 
+  /// 取消监听、断开商店连接并释放所有通知器。
   Future<void> dispose() async {
     _isDisposed = true;
     _unregisterLifecycleObserver();
@@ -726,13 +812,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     if (verifiedState.shouldGrantAccess && _hasTransactionIdentity(payload)) {
       await _reportTransaction(payload);
     }
-    final SubscriptionAccessState writableState =
-        _resolveWritableAccessState(verifiedState);
-    await _updateSubscriptionAccessState(writableState);
+    await _updateSubscriptionAccessState(verifiedState);
 
     return _SubscriptionVerificationResult(
       item: item,
-      verified: writableState.shouldGrantAccess,
+      verified: verifiedState.shouldGrantAccess,
     );
   }
 
@@ -899,48 +983,6 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       'effectiveUntil=${_formatExpiration(state.effectiveUntilMs ?? 0)}, '
       'active=${state.shouldGrantAccess}',
     );
-  }
-
-  SubscriptionAccessState _resolveWritableAccessState(
-    SubscriptionAccessState incomingState,
-  ) {
-    final SubscriptionAccessState? retainedGraceState =
-        _activeGraceStateOrNull(accessState.value) ??
-            _activeGraceStateOrNull(_readStoredAccessState());
-    if (retainedGraceState == null) {
-      return incomingState;
-    }
-
-    if (incomingState.status == SubscriptionAccessStatus.expired &&
-        incomingState.note == 'no active native entitlement') {
-      _log(
-        'Retain grace period access while native entitlements are empty: '
-        'productId=${retainedGraceState.productId}, '
-        'effectiveUntilMs=${retainedGraceState.effectiveUntilMs}',
-      );
-      return retainedGraceState.copyWith(
-        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
-        note:
-            'retained active grace period while native entitlements are empty',
-      );
-    }
-
-    return incomingState;
-  }
-
-  SubscriptionAccessState? _activeGraceStateOrNull(
-    SubscriptionAccessState? state,
-  ) {
-    if (state == null || state.status != SubscriptionAccessStatus.gracePeriod) {
-      return null;
-    }
-
-    final int effectiveUntilMs = state.effectiveUntilMs ?? 0;
-    if (effectiveUntilMs <= DateTime.now().millisecondsSinceEpoch) {
-      return null;
-    }
-
-    return state;
   }
 
   void _applyAccessState(SubscriptionAccessState state) {
@@ -1217,6 +1259,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         await _storeAdapter.resolveVerifiedAccessState(
       iap: _iap,
       subscriptions: matchingSubscriptions,
+      products: products.value,
       productIds: <String>[productId],
       fallbackProductId: productId,
       now: DateTime.now(),

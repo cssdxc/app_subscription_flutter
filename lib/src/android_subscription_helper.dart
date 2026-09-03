@@ -13,9 +13,11 @@ import 'package:pointycastle/signers/rsa_signer.dart';
 
 import 'subscription_access_state.dart';
 
+/// 提供 Google Play 订阅字段归一化、签名验证和 offer 选择规则。
 class AndroidSubscriptionHelper {
   const AndroidSubscriptionHelper._();
 
+  /// 从购买对象中解析稳定的商品标识。
   static String normalizedProductId(PurchaseAndroid? item) {
     if (item == null) {
       return '';
@@ -30,9 +32,11 @@ class AndroidSubscriptionHelper {
     return ids.isEmpty ? '' : ids.first.trim();
   }
 
+  /// 判断购买是否仍在等待用户或商店处理。
   static bool isPending(PurchaseAndroid item) =>
       item.purchaseState == PurchaseState.Pending;
 
+  /// 判断购买更新是否满足后续验证和确认条件。
   static bool shouldProcessPurchaseUpdate(PurchaseAndroid item) {
     return item.purchaseState == PurchaseState.Purchased &&
         item.isSuspendedAndroid != true &&
@@ -40,6 +44,7 @@ class AndroidSubscriptionHelper {
         (item.purchaseToken ?? '').isNotEmpty;
   }
 
+  /// 使用 Play Console 公钥验证购买签名及关键字段一致性。
   static bool verifyPurchaseSignature({
     required PurchaseAndroid purchase,
     required String licenseKey,
@@ -53,6 +58,7 @@ class AndroidSubscriptionHelper {
     }
 
     try {
+      // 签名只能证明原始购买数据未被篡改，仍需校验购买令牌、商品和包名。
       final RSAPublicKey publicKey = _parseLicenseKey(licenseKey);
       final Signer verifier = RSASigner(
         SHA1Digest(),
@@ -130,6 +136,7 @@ class AndroidSubscriptionHelper {
     );
   }
 
+  /// 将一个 Google Play 当前订阅映射为统一权益状态。
   static SubscriptionAccessState resolveAccessStateFromActiveSubscription({
     required ActiveSubscription subscription,
     DateTime? now,
@@ -148,6 +155,7 @@ class AndroidSubscriptionHelper {
     );
   }
 
+  /// 从多个 Google Play 当前订阅中选择可授予权益的状态。
   static SubscriptionAccessState resolveAccessStateFromActiveSubscriptions(
     List<ActiveSubscription> subscriptions, {
     required String fallbackProductId,
@@ -177,6 +185,7 @@ class AndroidSubscriptionHelper {
     );
   }
 
+  /// 返回包含有效购买令牌的订阅 offer。
   static List<SubscriptionOffer> purchasableOffers(
     ProductSubscriptionAndroid product,
   ) {
@@ -185,6 +194,7 @@ class AndroidSubscriptionHelper {
         .toList(growable: false);
   }
 
+  /// 解析本次购买使用的 base plan 或 offer。
   static SubscriptionOffer resolvePurchaseOffer(
     ProductSubscriptionAndroid product, {
     SubscriptionOffer? requestedOffer,
@@ -219,6 +229,7 @@ class AndroidSubscriptionHelper {
     );
   }
 
+  /// 判断商品列表中是否包含免费试用 offer。
   static bool hasFreeTrial(List<ProductSubscriptionAndroid> products) {
     return products.any(
       (product) => product.subscriptionOffers.any(
@@ -228,13 +239,18 @@ class AndroidSubscriptionHelper {
   }
 }
 
+/// 表示 Google Play 订阅 offer 无法用于当前购买。
 class AndroidSubscriptionOfferException implements Exception {
+  /// 创建包含稳定错误码和说明的 offer 异常。
   const AndroidSubscriptionOfferException({
     required this.code,
     required this.message,
   });
 
+  /// 可供调用方分类处理的错误码。
   final String code;
+
+  /// 面向日志或调用方的错误说明。
   final String message;
 
   @override
