@@ -69,6 +69,46 @@ void main() {
     }
   });
 
+  test('未知 StoreKit 状态使用已验证权益字段确定性降级', () {
+    final ActiveSubscription entitlement = _entitlement(
+      expirationDateIOS: (nowMs + 10000).toDouble(),
+    );
+
+    final SubscriptionAccessState state =
+        IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
+      status: const SubscriptionStatusIOS(
+        state: 'RenewalState(rawValue: 1)',
+      ),
+      verifiedEntitlement: entitlement,
+      fallbackProductId: 'fallback',
+      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+    );
+
+    expect(state.status, SubscriptionAccessStatus.unavailable);
+    expect(state.shouldGrantAccess, isFalse);
+  });
+
+  test('未知 StoreKit 状态可由 isActive 的已验证权益确定为 active', () {
+    final ActiveSubscription entitlement = ActiveSubscription(
+      isActive: true,
+      productId: 'subscribe_month_1',
+      transactionDate: 1,
+      transactionId: 'tx-active',
+    );
+
+    final SubscriptionAccessState state =
+        IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
+      status: const SubscriptionStatusIOS(
+        state: 'RenewalState(rawValue: 1)',
+      ),
+      verifiedEntitlement: entitlement,
+      fallbackProductId: 'fallback',
+      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+    );
+
+    expect(state.status, SubscriptionAccessStatus.active);
+  });
+
   test('宽限期由 StoreKit 状态决定，不比较设备时间', () {
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(

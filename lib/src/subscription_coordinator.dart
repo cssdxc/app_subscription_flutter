@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'subscription_access_state.dart';
 import 'subscription_action_result.dart';
 import 'subscription_catalog.dart';
+import 'ios_subscription_helper.dart';
 import 'subscription_store_adapter.dart';
 import 'subscription_transaction.dart';
 
@@ -786,6 +787,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       verifiedState = await _resolveAccessStateFromNativeStatus(
         productId: productId,
         fallbackTransactionId: payload.currentTransactionId,
+        verifiedPurchase: item,
       );
       final bool shouldRetry = retryAndroidEntitlementQuery &&
           (verifiedState == null ||
@@ -1245,6 +1247,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   Future<SubscriptionAccessState?> _resolveAccessStateFromNativeStatus({
     required String productId,
     required String fallbackTransactionId,
+    Purchase? verifiedPurchase,
   }) async {
     final List<ActiveSubscription>? subscriptions =
         await _queryActiveSubscriptions();
@@ -1255,10 +1258,17 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     final List<ActiveSubscription> matchingSubscriptions = subscriptions
         .where((subscription) => subscription.productId == productId)
         .toList(growable: false);
+    final List<ActiveSubscription> entitlements =
+        List<ActiveSubscription>.of(matchingSubscriptions);
+    if (entitlements.isEmpty && verifiedPurchase is PurchaseIOS) {
+      entitlements.add(
+        IosSubscriptionHelper.activeSubscriptionFromPurchase(verifiedPurchase),
+      );
+    }
     final SubscriptionAccessState state =
         await _storeAdapter.resolveVerifiedAccessState(
       iap: _iap,
-      subscriptions: matchingSubscriptions,
+      subscriptions: entitlements,
       products: products.value,
       productIds: <String>[productId],
       fallbackProductId: productId,

@@ -46,7 +46,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: v0.2.3
+      ref: v0.2.4
 ```
 
 正式项目建议固定到明确 tag。

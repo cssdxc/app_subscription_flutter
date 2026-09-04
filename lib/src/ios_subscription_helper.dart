@@ -27,6 +27,19 @@ class IosSubscriptionHelper {
         normalizedProductId(item).isNotEmpty;
   }
 
+  /// Converts a locally verified purchase into a temporary entitlement while
+  /// StoreKit refreshes its current-entitlements query after checkout.
+  static ActiveSubscription activeSubscriptionFromPurchase(PurchaseIOS item) {
+    return ActiveSubscription(
+      expirationDateIOS: item.expirationDateIOS,
+      isActive: true,
+      productId: normalizedProductId(item),
+      renewalInfoIOS: item.renewalInfoIOS,
+      transactionDate: item.transactionDate,
+      transactionId: item.transactionId,
+    );
+  }
+
   /// 从多个权益状态中选择最应授予用户的状态。
   static SubscriptionAccessState selectMostRelevantAccessState(
     Iterable<SubscriptionAccessState> states,
@@ -59,8 +72,7 @@ class IosSubscriptionHelper {
     DateTime? now,
   }) {
     final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    final String normalizedState =
-        status.state.trim().replaceAll(RegExp('[^A-Za-z]'), '').toLowerCase();
+    final String normalizedState = status.state.trim();
     final String productId = verifiedEntitlement?.productId.isNotEmpty == true
         ? verifiedEntitlement!.productId
         : fallbackProductId;
@@ -84,7 +96,7 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: subscribed',
         );
-      case 'ingraceperiod':
+      case 'inGracePeriod':
         if (verifiedEntitlement == null) {
           return SubscriptionAccessState(
             status: SubscriptionAccessStatus.unavailable,
@@ -104,7 +116,7 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: inGracePeriod',
         );
-      case 'inbillingretryperiod':
+      case 'inBillingRetryPeriod':
         return SubscriptionAccessState(
           status: SubscriptionAccessStatus.billingRetry,
           evaluatedAtMs: nowMs,
@@ -129,6 +141,18 @@ class IosSubscriptionHelper {
           note: 'StoreKit subscription state: revoked',
         );
       default:
+        final SubscriptionAccessState? entitlementState =
+            _resolveAccessStateFromEntitlement(
+          entitlement: verifiedEntitlement,
+          fallbackProductId: productId,
+          now: now,
+        );
+        if (entitlementState != null) {
+          return entitlementState.copyWith(
+            note:
+                'StoreKit state unavailable; used verified entitlement fields',
+          );
+        }
         return SubscriptionAccessState(
           status: SubscriptionAccessStatus.unavailable,
           evaluatedAtMs: nowMs,
@@ -269,5 +293,68 @@ class IosSubscriptionHelper {
       }
     }
     return mostRecent;
+  }
+
+  static SubscriptionAccessState? _resolveAccessStateFromEntitlement({
+    required ActiveSubscription? entitlement,
+    required String fallbackProductId,
+    DateTime? now,
+  }) {
+    if (entitlement == null || !entitlement.isActive) {
+      return null;
+    }
+
+    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final RenewalInfoIOS? renewalInfo = entitlement.renewalInfoIOS;
+    if (renewalInfo?.isInBillingRetry == true) {
+      return SubscriptionAccessState(
+        status: SubscriptionAccessStatus.billingRetry,
+        evaluatedAtMs: nowMs,
+        productId: entitlement.productId.isNotEmpty
+            ? entitlement.productId
+            : fallbackProductId,
+        transactionId: entitlement.transactionId,
+        note: 'verified entitlement is in billing retry',
+      );
+    }
+
+    final int? graceUntilMs = renewalInfo?.gracePeriodExpirationDate?.toInt();
+    if (graceUntilMs != null && graceUntilMs > nowMs) {
+      return SubscriptionAccessState(
+        status: SubscriptionAccessStatus.gracePeriod,
+        evaluatedAtMs: nowMs,
+        effectiveUntilMs: graceUntilMs,
+        productId: entitlement.productId.isNotEmpty
+            ? entitlement.productId
+            : fallbackProductId,
+        transactionId: entitlement.transactionId,
+        note: 'verified entitlement is in grace period',
+      );
+    }
+
+    final int? expirationMs = entitlement.expirationDateIOS?.toInt();
+    if (expirationMs != null && expirationMs <= nowMs) {
+      return SubscriptionAccessState(
+        status: SubscriptionAccessStatus.expired,
+        evaluatedAtMs: nowMs,
+        effectiveUntilMs: expirationMs,
+        productId: entitlement.productId.isNotEmpty
+            ? entitlement.productId
+            : fallbackProductId,
+        transactionId: entitlement.transactionId,
+        note: 'verified entitlement is expired',
+      );
+    }
+
+    return SubscriptionAccessState(
+      status: SubscriptionAccessStatus.active,
+      evaluatedAtMs: nowMs,
+      effectiveUntilMs: expirationMs,
+      productId: entitlement.productId.isNotEmpty
+          ? entitlement.productId
+          : fallbackProductId,
+      transactionId: entitlement.transactionId,
+      note: 'verified entitlement is active',
+    );
   }
 }
