@@ -1,4 +1,5 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:platform/platform.dart';
@@ -20,10 +21,7 @@ ActiveSubscription _entitlement({
   );
 }
 
-ProductSubscriptionIOS _product({
-  required String id,
-  required String groupId,
-}) {
+ProductSubscriptionIOS _product({required String id, required String groupId}) {
   return ProductSubscriptionIOS(
     currency: 'USD',
     description: id,
@@ -42,28 +40,86 @@ ProductSubscriptionIOS _product({
 void main() {
   const int nowMs = 1700000000000;
 
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('通过插件解析新版原生 StoreKit 状态，宽限期不依赖 isActive', () async {
+    const MethodChannel channel = MethodChannel('flutter_inapp');
+    final FlutterInappPurchase iap = FlutterInappPurchase(
+      platform: FakePlatform(operatingSystem: Platform.iOS),
+    );
+    const AppStoreSubscriptionAdapter adapter = AppStoreSubscriptionAdapter();
+    final Map<String, SubscriptionAccessStatus> expectedStatuses =
+        <String, SubscriptionAccessStatus>{
+          'subscribed': SubscriptionAccessStatus.active,
+          'inGracePeriod': SubscriptionAccessStatus.gracePeriod,
+          'inBillingRetryPeriod': SubscriptionAccessStatus.billingRetry,
+          'expired': SubscriptionAccessStatus.expired,
+          'revoked': SubscriptionAccessStatus.revoked,
+          'unknown': SubscriptionAccessStatus.unavailable,
+        };
+    String nativeState = 'unknown';
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          expect(call.method, 'subscriptionStatusIOS');
+          expect(call.arguments, <String, String>{'sku': 'subscribe_month_1'});
+          return <Map<String, Object>>[
+            <String, Object>{
+              'state': nativeState,
+              'renewalInfo': <String, Object>{
+                'willAutoRenew': true,
+                'gracePeriodExpirationDate': 1,
+              },
+            },
+          ];
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    for (final MapEntry<String, SubscriptionAccessStatus> entry
+        in expectedStatuses.entries) {
+      nativeState = entry.key;
+      final SubscriptionAccessState state = await adapter
+          .resolveVerifiedAccessState(
+            iap: iap,
+            subscriptions: <ActiveSubscription>[_entitlement()],
+            products: const <ProductSubscription>[],
+            productIds: const <String>['subscribe_month_1'],
+            fallbackProductId: 'subscribe_month_1',
+            now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+          );
+
+      expect(state.status, entry.value, reason: nativeState);
+      if (nativeState == 'inGracePeriod') {
+        expect(state.shouldGrantAccess, isTrue);
+        expect(state.effectiveUntilMs, 1);
+      }
+    }
+  });
+
   test('按 Apple StoreKit 状态映射五种订阅生命周期', () {
     final ActiveSubscription entitlement = _entitlement(
       expirationDateIOS: (nowMs + 10000).toDouble(),
     );
     final Map<String, SubscriptionAccessStatus> expectedStatuses =
         <String, SubscriptionAccessStatus>{
-      'subscribed': SubscriptionAccessStatus.active,
-      'inGracePeriod': SubscriptionAccessStatus.gracePeriod,
-      'inBillingRetryPeriod': SubscriptionAccessStatus.billingRetry,
-      'expired': SubscriptionAccessStatus.expired,
-      'revoked': SubscriptionAccessStatus.revoked,
-    };
+          'subscribed': SubscriptionAccessStatus.active,
+          'inGracePeriod': SubscriptionAccessStatus.gracePeriod,
+          'inBillingRetryPeriod': SubscriptionAccessStatus.billingRetry,
+          'expired': SubscriptionAccessStatus.expired,
+          'revoked': SubscriptionAccessStatus.revoked,
+        };
 
     for (final MapEntry<String, SubscriptionAccessStatus> entry
         in expectedStatuses.entries) {
       final SubscriptionAccessState state =
           IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-        status: SubscriptionStatusIOS(state: entry.key),
-        verifiedEntitlement: entitlement,
-        fallbackProductId: 'fallback',
-        now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-      );
+            status: SubscriptionStatusIOS(state: entry.key),
+            verifiedEntitlement: entitlement,
+            fallbackProductId: 'fallback',
+            now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+          );
 
       expect(state.status, entry.value, reason: entry.key);
     }
@@ -76,13 +132,13 @@ void main() {
 
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-      status: const SubscriptionStatusIOS(
-        state: 'RenewalState(rawValue: 1)',
-      ),
-      verifiedEntitlement: entitlement,
-      fallbackProductId: 'fallback',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+          status: const SubscriptionStatusIOS(
+            state: 'RenewalState(rawValue: 1)',
+          ),
+          verifiedEntitlement: entitlement,
+          fallbackProductId: 'fallback',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.unavailable);
     expect(state.shouldGrantAccess, isFalse);
@@ -98,13 +154,13 @@ void main() {
 
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-      status: const SubscriptionStatusIOS(
-        state: 'RenewalState(rawValue: 1)',
-      ),
-      verifiedEntitlement: entitlement,
-      fallbackProductId: 'fallback',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+          status: const SubscriptionStatusIOS(
+            state: 'RenewalState(rawValue: 1)',
+          ),
+          verifiedEntitlement: entitlement,
+          fallbackProductId: 'fallback',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.active);
   });
@@ -112,17 +168,17 @@ void main() {
   test('宽限期由 StoreKit 状态决定，不比较设备时间', () {
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-      status: const SubscriptionStatusIOS(
-        state: 'inGracePeriod',
-        renewalInfo: RenewalInfoIOS(
-          gracePeriodExpirationDate: 1,
-          willAutoRenew: true,
-        ),
-      ),
-      verifiedEntitlement: _entitlement(),
-      fallbackProductId: 'subscribe_month_1',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+          status: const SubscriptionStatusIOS(
+            state: 'inGracePeriod',
+            renewalInfo: RenewalInfoIOS(
+              gracePeriodExpirationDate: 1,
+              willAutoRenew: true,
+            ),
+          ),
+          verifiedEntitlement: _entitlement(),
+          fallbackProductId: 'subscribe_month_1',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.gracePeriod);
     expect(state.shouldGrantAccess, isTrue);
@@ -136,11 +192,11 @@ void main() {
     ]) {
       final SubscriptionAccessState state =
           IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-        status: SubscriptionStatusIOS(state: storeKitState),
-        verifiedEntitlement: null,
-        fallbackProductId: 'subscribe_month_1',
-        now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-      );
+            status: SubscriptionStatusIOS(state: storeKitState),
+            verifiedEntitlement: null,
+            fallbackProductId: 'subscribe_month_1',
+            now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+          );
 
       expect(
         state.status,
@@ -154,11 +210,11 @@ void main() {
   test('未知 Apple 状态不会授予权益', () {
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatus(
-      status: const SubscriptionStatusIOS(state: 'futureState'),
-      verifiedEntitlement: _entitlement(),
-      fallbackProductId: 'subscribe_month_1',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+          status: const SubscriptionStatusIOS(state: 'futureState'),
+          verifiedEntitlement: _entitlement(),
+          fallbackProductId: 'subscribe_month_1',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.unavailable);
     expect(state.shouldGrantAccess, isFalse);
@@ -167,11 +223,11 @@ void main() {
   test('StoreKit 成功返回空状态时视为没有订阅', () {
     final SubscriptionAccessState state =
         IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatuses(
-      const <SubscriptionStatusIOS>[],
-      verifiedEntitlements: const <ActiveSubscription>[],
-      fallbackProductId: 'subscribe_month_1',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+          const <SubscriptionStatusIOS>[],
+          verifiedEntitlements: const <ActiveSubscription>[],
+          fallbackProductId: 'subscribe_month_1',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.expired);
     expect(state.shouldGrantAccess, isFalse);
@@ -193,21 +249,21 @@ void main() {
       platform: FakePlatform(operatingSystem: Platform.iOS),
     );
 
-    final SubscriptionAccessState state =
-        await adapter.resolveVerifiedAccessState(
-      iap: iap,
-      subscriptions: <ActiveSubscription>[
-        _entitlement(productId: 'basic_month'),
-      ],
-      products: <ProductSubscription>[
-        _product(id: 'basic_month', groupId: 'basic'),
-        _product(id: 'basic_year', groupId: 'basic'),
-        _product(id: 'pro_month', groupId: 'pro'),
-      ],
-      productIds: const <String>['basic_month', 'basic_year', 'pro_month'],
-      fallbackProductId: 'basic_month,basic_year,pro_month',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+    final SubscriptionAccessState state = await adapter
+        .resolveVerifiedAccessState(
+          iap: iap,
+          subscriptions: <ActiveSubscription>[
+            _entitlement(productId: 'basic_month'),
+          ],
+          products: <ProductSubscription>[
+            _product(id: 'basic_month', groupId: 'basic'),
+            _product(id: 'basic_year', groupId: 'basic'),
+            _product(id: 'pro_month', groupId: 'pro'),
+          ],
+          productIds: const <String>['basic_month', 'basic_year', 'pro_month'],
+          fallbackProductId: 'basic_month,basic_year,pro_month',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(queriedProductIds, <String>['basic_month', 'pro_month']);
     expect(state.status, SubscriptionAccessStatus.active);
@@ -229,18 +285,18 @@ void main() {
       platform: FakePlatform(operatingSystem: Platform.iOS),
     );
 
-    final SubscriptionAccessState state =
-        await adapter.resolveVerifiedAccessState(
-      iap: iap,
-      subscriptions: const <ActiveSubscription>[],
-      products: <ProductSubscription>[
-        _product(id: 'basic_month', groupId: 'basic'),
-        _product(id: 'pro_month', groupId: 'pro'),
-      ],
-      productIds: const <String>['basic_month', 'pro_month'],
-      fallbackProductId: 'basic_month,pro_month',
-      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-    );
+    final SubscriptionAccessState state = await adapter
+        .resolveVerifiedAccessState(
+          iap: iap,
+          subscriptions: const <ActiveSubscription>[],
+          products: <ProductSubscription>[
+            _product(id: 'basic_month', groupId: 'basic'),
+            _product(id: 'pro_month', groupId: 'pro'),
+          ],
+          productIds: const <String>['basic_month', 'pro_month'],
+          fallbackProductId: 'basic_month,pro_month',
+          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+        );
 
     expect(state.status, SubscriptionAccessStatus.unavailable);
     expect(state.shouldGrantAccess, isFalse);

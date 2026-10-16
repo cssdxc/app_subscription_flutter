@@ -1,91 +1,76 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 
 import 'subscription_service_example.dart';
 
-/// 示例界面使用的本地化文案键。
-class ExampleTextKey {
-  /// 用户取消购买时展示的文案。
-  static String get cancel => 'Cancelled';
+/// 界面直接订阅库的状态；文案、提示、导航和埋点均由宿主负责。
+class ExampleSubscriptionPanel extends StatelessWidget {
+  const ExampleSubscriptionPanel({
+    super.key,
+    required this.coordinator,
+    required this.onResult,
+  });
 
-  /// 购买失败时展示的文案。
-  static String get buyFailed => 'Purchase failed';
+  final SubscriptionCoordinator coordinator;
+  final ValueChanged<SubscriptionActionResult> onResult;
 
-  /// 恢复失败时展示的文案。
-  static String get restoreFailed => 'Restore failed';
-}
-
-/// 演示界面层如何调用订阅服务并处理操作结果。
-class ExampleSubscriptionUiDelegate {
-  /// 创建示例订阅界面代理。
-  ExampleSubscriptionUiDelegate(this.subscriptionService);
-
-  /// 界面使用的订阅服务。
-  final ExampleSubscriptionService subscriptionService;
-
-  /// 购买调用方指定的订阅商品并处理结果提示。
-  Future<SubscriptionActionResult> purchase({
-    required ProductSubscription? product,
-    required String source,
-  }) async {
-    debugPrint('[SubscriptionUI] loading');
-    final result = await subscriptionService.purchaseSubscription(
-      product,
-      source: source,
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<SubscriptionOperationState>(
+      valueListenable: coordinator.activity,
+      builder: (context, activity, _) {
+        return Stack(
+          children: [
+            ValueListenableBuilder<List<SubscriptionPlanDetails>>(
+              valueListenable: coordinator.plans,
+              builder: (context, plans, _) {
+                final yearly = coordinator.planDetails(
+                  examplePlans[ExamplePlan.yearly]!,
+                );
+                // 52 是宿主明确指定的展示除数，不用于计算实际扣款或权益到期时间。
+                final average = yearly.price?.averagePrice(
+                  divisor: 52,
+                  locale: Localizations.localeOf(context).toString(),
+                  unitLabel: '周',
+                );
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final details in plans)
+                      FilledButton(
+                        onPressed: activity.isBusy || !details.canPurchase
+                            ? null
+                            : () async => onResult(
+                                await coordinator.purchasePlan(
+                                  details.plan,
+                                  source: 'example_paywall',
+                                ),
+                              ),
+                        child: Text(details.displayPrice),
+                      ),
+                    if (average != null) Text(average),
+                    TextButton(
+                      onPressed: activity.isBusy
+                          ? null
+                          : () async {
+                              onResult(await coordinator.restore());
+                            },
+                      child: const Text('恢复购买'),
+                    ),
+                  ],
+                );
+              },
+            ),
+            if (activity.showBlockingLoading)
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: Color(0x66000000),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+              ),
+          ],
+        );
+      },
     );
-    debugPrint('[SubscriptionUI] done');
-
-    if (result.success) {
-      debugPrint(
-        '[SubscriptionUI] success source=$source productId=${result.productId ?? ''}',
-      );
-      return result;
-    }
-
-    if (result.cancelled) {
-      debugPrint(ExampleTextKey.cancel);
-      return result;
-    }
-
-    debugPrint(ExampleTextKey.buyFailed);
-    return result;
-  }
-
-  /// 购买示例月订阅并处理结果提示。
-  Future<SubscriptionActionResult> purchaseMonthly({
-    String source = 'paywall_monthly',
-  }) async {
-    debugPrint('[SubscriptionUI] loading');
-    final result = await subscriptionService.purchaseMonthly(source: source);
-    debugPrint('[SubscriptionUI] done');
-
-    if (result.success) {
-      debugPrint(
-        '[SubscriptionUI] success source=$source productId=${result.productId ?? ''}',
-      );
-      return result;
-    }
-
-    if (result.cancelled) {
-      debugPrint(ExampleTextKey.cancel);
-      return result;
-    }
-
-    debugPrint(ExampleTextKey.buyFailed);
-    return result;
-  }
-
-  /// 恢复已有购买并处理结果提示。
-  Future<SubscriptionActionResult> restore({
-    required String source,
-  }) async {
-    debugPrint('[SubscriptionUI] loading');
-    final result = await subscriptionService.restorePurchases(source: source);
-    debugPrint('[SubscriptionUI] done');
-
-    if (result.failed) {
-      debugPrint(ExampleTextKey.restoreFailed);
-    }
-    return result;
   }
 }

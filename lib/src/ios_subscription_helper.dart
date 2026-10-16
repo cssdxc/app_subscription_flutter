@@ -1,25 +1,28 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_access_state.dart';
+import 'subscription_plan.dart';
+
+/// 插件 SubscriptionStatusIOS.state 当前仍是 String；只在商店边界解析一次。
+/// https://developer.apple.com/documentation/storekit/product/subscriptioninfo/renewalstate
+enum StoreKitSubscriptionState {
+  subscribed,
+  inGracePeriod,
+  inBillingRetryPeriod,
+  expired,
+  revoked,
+  unknown;
+
+  static StoreKitSubscriptionState fromNative(String value) => values
+      .firstWhere((state) => state.name == value.trim(), orElse: () => unknown);
+}
 
 /// 提供 App Store 订阅字段归一化、权益选择和试用资格判断。
 class IosSubscriptionHelper {
   const IosSubscriptionHelper._();
 
   /// 从 StoreKit 购买对象中解析稳定的商品标识。
-  static String normalizedProductId(PurchaseIOS? item) {
-    if (item == null) {
-      return '';
-    }
-
-    final String productId = item.productId.trim();
-    if (productId.isNotEmpty && productId != '0') {
-      return productId;
-    }
-
-    final String fallbackId = item.id.trim();
-    return fallbackId.isNotEmpty && fallbackId != '0' ? fallbackId : '';
-  }
+  static String normalizedProductId(PurchaseIOS item) => item.productId.trim();
 
   /// 判断购买更新是否满足后续验证和完成交易条件。
   static bool shouldProcessPurchaseUpdate(PurchaseIOS item) {
@@ -27,8 +30,7 @@ class IosSubscriptionHelper {
         normalizedProductId(item).isNotEmpty;
   }
 
-  /// Converts a locally verified purchase into a temporary entitlement while
-  /// StoreKit refreshes its current-entitlements query after checkout.
+  /// 购买后当前权益查询尚未刷新时，将已通过本地验证的购买转换为临时权益。
   static ActiveSubscription activeSubscriptionFromPurchase(PurchaseIOS item) {
     return ActiveSubscription(
       expirationDateIOS: item.expirationDateIOS,
@@ -44,8 +46,9 @@ class IosSubscriptionHelper {
   static SubscriptionAccessState selectMostRelevantAccessState(
     Iterable<SubscriptionAccessState> states,
   ) {
-    final List<SubscriptionAccessState> resolvedStates =
-        states.toList(growable: false);
+    final List<SubscriptionAccessState> resolvedStates = states.toList(
+      growable: false,
+    );
     if (resolvedStates.isEmpty) {
       return SubscriptionAccessState(
         status: SubscriptionAccessStatus.unavailable,
@@ -72,14 +75,14 @@ class IosSubscriptionHelper {
     DateTime? now,
   }) {
     final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    final String normalizedState = status.state.trim();
+    final normalizedState = StoreKitSubscriptionState.fromNative(status.state);
     final String productId = verifiedEntitlement?.productId.isNotEmpty == true
         ? verifiedEntitlement!.productId
         : fallbackProductId;
     final String transactionId = verifiedEntitlement?.transactionId ?? '';
 
     switch (normalizedState) {
-      case 'subscribed':
+      case StoreKitSubscriptionState.subscribed:
         if (verifiedEntitlement == null) {
           return SubscriptionAccessState(
             status: SubscriptionAccessStatus.unavailable,
@@ -96,7 +99,7 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: subscribed',
         );
-      case 'inGracePeriod':
+      case StoreKitSubscriptionState.inGracePeriod:
         if (verifiedEntitlement == null) {
           return SubscriptionAccessState(
             status: SubscriptionAccessStatus.unavailable,
@@ -110,13 +113,13 @@ class IosSubscriptionHelper {
           evaluatedAtMs: nowMs,
           effectiveUntilMs:
               status.renewalInfo?.gracePeriodExpirationDate?.toInt() ??
-                  verifiedEntitlement.renewalInfoIOS?.gracePeriodExpirationDate
-                      ?.toInt(),
+              verifiedEntitlement.renewalInfoIOS?.gracePeriodExpirationDate
+                  ?.toInt(),
           productId: productId,
           transactionId: transactionId,
           note: 'StoreKit subscription state: inGracePeriod',
         );
-      case 'inBillingRetryPeriod':
+      case StoreKitSubscriptionState.inBillingRetryPeriod:
         return SubscriptionAccessState(
           status: SubscriptionAccessStatus.billingRetry,
           evaluatedAtMs: nowMs,
@@ -124,7 +127,7 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: inBillingRetryPeriod',
         );
-      case 'expired':
+      case StoreKitSubscriptionState.expired:
         return SubscriptionAccessState(
           status: SubscriptionAccessStatus.expired,
           evaluatedAtMs: nowMs,
@@ -132,7 +135,7 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: expired',
         );
-      case 'revoked':
+      case StoreKitSubscriptionState.revoked:
         return SubscriptionAccessState(
           status: SubscriptionAccessStatus.revoked,
           evaluatedAtMs: nowMs,
@@ -140,13 +143,13 @@ class IosSubscriptionHelper {
           transactionId: transactionId,
           note: 'StoreKit subscription state: revoked',
         );
-      default:
+      case StoreKitSubscriptionState.unknown:
         final SubscriptionAccessState? entitlementState =
             _resolveAccessStateFromEntitlement(
-          entitlement: verifiedEntitlement,
-          fallbackProductId: productId,
-          now: now,
-        );
+              entitlement: verifiedEntitlement,
+              fallbackProductId: productId,
+              now: now,
+            );
         if (entitlementState != null) {
           return entitlementState.copyWith(
             note:
@@ -180,8 +183,9 @@ class IosSubscriptionHelper {
       );
     }
 
-    final ActiveSubscription? verifiedEntitlement =
-        _mostRecentEntitlement(verifiedEntitlements);
+    final ActiveSubscription? verifiedEntitlement = _mostRecentEntitlement(
+      verifiedEntitlements,
+    );
 
     return selectMostRelevantAccessState(
       statuses.map(
@@ -195,48 +199,44 @@ class IosSubscriptionHelper {
     );
   }
 
-  /// 根据订阅组资格和购买历史判断是否可展示免费试用。
-  static Future<bool> computeTrialEligibility({
+  /// 逐订阅组查询资格。同组只查一次；没有组信息或查询失败均为 unknown。
+  /// 不能用“没有当前购买”推断“从未享受试用”。
+  static Future<Map<String, SubscriptionTrialEligibility>>
+  queryTrialEligibility({
     required FlutterInappPurchase iap,
     required List<ProductSubscriptionIOS> products,
-    required List<String> subscriptionProductIds,
-    void Function(String message)? logger,
   }) async {
-    final List<ProductSubscriptionIOS> productsWithTrial = products
-        .where(
-          (product) =>
-              product.introductoryPricePaymentModeIOS ==
-                  PaymentModeIOS.FreeTrial ||
-              (product.subscriptionOffers ?? const <SubscriptionOffer>[]).any(
-                (offer) => offer.paymentMode == PaymentMode.FreeTrial,
-              ),
-        )
-        .toList(growable: false);
-    final bool productHasFreeTrial = productsWithTrial.isNotEmpty;
-
-    String? groupId;
-    for (final ProductSubscriptionIOS product in productsWithTrial) {
-      if ((product.subscriptionGroupIdIOS ?? '').isNotEmpty) {
-        groupId = product.subscriptionGroupIdIOS;
-        break;
+    final groups = <String, SubscriptionTrialEligibility>{};
+    final result = <String, SubscriptionTrialEligibility>{};
+    for (final product in products) {
+      final hasTrial =
+          product.introductoryPricePaymentModeIOS == PaymentModeIOS.FreeTrial ||
+          (product.subscriptionOffers ?? <SubscriptionOffer>[]).any(
+            (offer) =>
+                offer.type == DiscountOfferType.Introductory &&
+                offer.paymentMode == PaymentMode.FreeTrial,
+          );
+      if (!hasTrial) {
+        result[product.id] = SubscriptionTrialEligibility.ineligible;
+        continue;
       }
+      final group = product.subscriptionGroupIdIOS?.trim() ?? '';
+      if (group.isEmpty) {
+        result[product.id] = SubscriptionTrialEligibility.unknown;
+        continue;
+      }
+      if (!groups.containsKey(group)) {
+        try {
+          groups[group] = await iap.isEligibleForIntroOfferIOS(group)
+              ? SubscriptionTrialEligibility.eligible
+              : SubscriptionTrialEligibility.ineligible;
+        } catch (_) {
+          groups[group] = SubscriptionTrialEligibility.unknown;
+        }
+      }
+      result[product.id] = groups[group]!;
     }
-
-    if ((groupId ?? '').isNotEmpty) {
-      final bool eligible = await iap.isEligibleForIntroOfferIOS(groupId!);
-      logger?.call(
-        'App Store free trial eligible: ${productHasFreeTrial && eligible}',
-      );
-      return productHasFreeTrial && eligible;
-    }
-
-    final List<Purchase> items = await iap.getAvailablePurchases();
-    final bool userHasSubscriptionHistory = items.whereType<PurchaseIOS>().any(
-          (item) => subscriptionProductIds.contains(normalizedProductId(item)),
-        );
-    final bool eligible = productHasFreeTrial && !userHasSubscriptionHistory;
-    logger?.call('App Store free trial eligible from history: $eligible');
-    return eligible;
+    return Map.unmodifiable(result);
   }
 
   static SubscriptionAccessState _preferAccessState(
@@ -304,52 +304,11 @@ class IosSubscriptionHelper {
       return null;
     }
 
-    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    final RenewalInfoIOS? renewalInfo = entitlement.renewalInfoIOS;
-    if (renewalInfo?.isInBillingRetry == true) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.billingRetry,
-        evaluatedAtMs: nowMs,
-        productId: entitlement.productId.isNotEmpty
-            ? entitlement.productId
-            : fallbackProductId,
-        transactionId: entitlement.transactionId,
-        note: 'verified entitlement is in billing retry',
-      );
-    }
-
-    final int? graceUntilMs = renewalInfo?.gracePeriodExpirationDate?.toInt();
-    if (graceUntilMs != null && graceUntilMs > nowMs) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.gracePeriod,
-        evaluatedAtMs: nowMs,
-        effectiveUntilMs: graceUntilMs,
-        productId: entitlement.productId.isNotEmpty
-            ? entitlement.productId
-            : fallbackProductId,
-        transactionId: entitlement.transactionId,
-        note: 'verified entitlement is in grace period',
-      );
-    }
-
-    final int? expirationMs = entitlement.expirationDateIOS?.toInt();
-    if (expirationMs != null && expirationMs <= nowMs) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.expired,
-        evaluatedAtMs: nowMs,
-        effectiveUntilMs: expirationMs,
-        productId: entitlement.productId.isNotEmpty
-            ? entitlement.productId
-            : fallbackProductId,
-        transactionId: entitlement.transactionId,
-        note: 'verified entitlement is expired',
-      );
-    }
-
+    // isActive 是 StoreKit 验证的结果；日期只用于展示。
     return SubscriptionAccessState(
       status: SubscriptionAccessStatus.active,
-      evaluatedAtMs: nowMs,
-      effectiveUntilMs: expirationMs,
+      evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+      effectiveUntilMs: entitlement.expirationDateIOS?.toInt(),
       productId: entitlement.productId.isNotEmpty
           ? entitlement.productId
           : fallbackProductId,

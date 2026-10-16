@@ -1,13 +1,15 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
-import 'android_subscription_helper.dart';
-import 'ios_subscription_helper.dart';
+import 'app_store_subscription_adapter.dart';
+import 'google_play_subscription_adapter.dart';
 import 'subscription_access_state.dart';
 import 'subscription_transaction.dart';
+import 'subscription_failure.dart';
+import 'subscription_plan.dart';
 
 /// 查询一个 App Store 订阅组的 StoreKit 2 状态；主要用于测试替换默认查询。
-typedef SubscriptionStatusQueryIOS = Future<List<SubscriptionStatusIOS>>
-    Function(String productId);
+typedef SubscriptionStatusQueryIOS =
+    Future<List<SubscriptionStatusIOS>> Function(String productId);
 
 /// 发起订阅购买时传给对应商店的可选参数。
 class SubscriptionPurchaseOptions {
@@ -34,6 +36,16 @@ class SubscriptionPurchaseOptions {
 
   /// Google Play 促销价格是否基于用户个性化处理。
   final bool? isOfferPersonalizedAndroid;
+
+  /// 保留账户关联等参数，仅替换由套餐解析出的 offer。
+  SubscriptionPurchaseOptions withOffer(SubscriptionOffer? value) =>
+      SubscriptionPurchaseOptions(
+        offer: value,
+        appAccountTokenIOS: appAccountTokenIOS,
+        obfuscatedAccountIdAndroid: obfuscatedAccountIdAndroid,
+        obfuscatedProfileIdAndroid: obfuscatedProfileIdAndroid,
+        isOfferPersonalizedAndroid: isOfferPersonalizedAndroid,
+      );
 }
 
 /// 隔离 App Store 与 Google Play 差异的订阅商店适配契约。
@@ -62,7 +74,8 @@ abstract interface class SubscriptionStoreAdapter {
       );
     }
     throw UnsupportedError(
-        'Subscriptions are supported only on iOS and Android.');
+      'Subscriptions are supported only on iOS and Android.',
+    );
   }
 
   /// 当前适配器是否支持该商品类型。
@@ -118,542 +131,27 @@ abstract interface class SubscriptionStoreAdapter {
     DateTime? now,
   });
 
-  /// 计算当前商品集合是否包含用户可用的免费试用。
-  Future<bool> computeTrialEligibility({
+  /// Apple 按订阅组查询试用资格；Google 的资格由目录按已选优惠解析。
+  Future<Map<String, SubscriptionTrialEligibility>> queryTrialEligibility({
     required FlutterInappPurchase iap,
     required List<ProductSubscription> products,
-    required List<String> productIds,
-    void Function(String message)? logger,
   });
 
   /// 将平台购买对象转换为统一交易回传载荷。
   SubscriptionTransactionPayload transactionPayload(Purchase purchase);
 }
 
-/// 负责 App Store 购买、验证和权益映射。
-class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
-  /// 创建 App Store 订阅适配器。
-  const AppStoreSubscriptionAdapter({this.subscriptionStatusQuery});
-
-  /// 可选的 StoreKit 状态查询替身；生产环境直接使用插件接口。
-  final SubscriptionStatusQueryIOS? subscriptionStatusQuery;
-
-  @override
-  bool supportsProduct(ProductSubscription product) =>
-      product is ProductSubscriptionIOS;
-
-  @override
-  bool supportsPurchase(Purchase purchase) => purchase is PurchaseIOS;
-
-  @override
-  List<SubscriptionOffer> offersFor(ProductSubscription product) {
-    if (product is! ProductSubscriptionIOS) {
-      return const <SubscriptionOffer>[];
-    }
-    return product.subscriptionOffers ?? const <SubscriptionOffer>[];
-  }
-
-  @override
-  String normalizedProductId(Purchase purchase) =>
-      IosSubscriptionHelper.normalizedProductId(purchase as PurchaseIOS);
-
-  @override
-  bool isPending(Purchase purchase) =>
-      purchase.purchaseState == PurchaseState.Pending;
-
-  @override
-  bool shouldProcessPurchaseUpdate(Purchase purchase) =>
-      purchase is PurchaseIOS &&
-      IosSubscriptionHelper.shouldProcessPurchaseUpdate(purchase);
-
-  @override
-  SubscriptionAccessState? blockingAccessState(Purchase purchase) => null;
-
-  @override
-  Future<void> requestPurchase({
-    required FlutterInappPurchase iap,
-    required ProductSubscription product,
-    required SubscriptionPurchaseOptions options,
-  }) {
-    if (product is! ProductSubscriptionIOS) {
-      throw const SubscriptionStoreException(
-        code: 'invalid-product-platform',
-        message: 'The product is not an App Store subscription.',
-      );
-    }
-    if (options.offer != null) {
-      throw const SubscriptionStoreException(
-        code: 'unsupported-offer',
-        message: 'Signed App Store promotional offers are not configured.',
-      );
-    }
-    return iap.requestPurchase(
-      RequestPurchaseProps.subs((
-        apple: RequestSubscriptionIosProps(
-          sku: product.id,
-          appAccountToken: options.appAccountTokenIOS,
-        ),
-        google: null,
-      )),
-    );
-  }
-
-  @override
-  Future<List<Purchase>> restorePurchases(FlutterInappPurchase iap) async {
-    await iap.restorePurchases();
-    return iap.getAvailablePurchases();
-  }
-
-  @override
-  Future<void> finishTransaction({
-    required FlutterInappPurchase iap,
-    required Purchase purchase,
-  }) {
-    return iap.finishTransaction(purchase: purchase, isConsumable: false);
-  }
-
-  @override
-  Future<void> verifyPurchaseLocally({
-    required FlutterInappPurchase iap,
-    required Purchase purchase,
-  }) async {
-    final PurchaseIOS item = purchase as PurchaseIOS;
-    final String productId = normalizedProductId(item);
-    if (productId.isEmpty || !await iap.isTransactionVerifiedIOS(productId)) {
-      throw const SubscriptionStoreException(
-        code: 'local-verification-failed',
-        message: 'StoreKit could not verify the subscription transaction.',
-      );
-    }
-  }
-
-  @override
-  Future<SubscriptionAccessState> resolveVerifiedAccessState({
-    required FlutterInappPurchase iap,
-    required List<ActiveSubscription> subscriptions,
-    required List<ProductSubscription> products,
-    required List<String> productIds,
-    required String fallbackProductId,
-    DateTime? now,
-  }) async {
-    final List<_AppStoreSubscriptionGroup> groups =
-        _resolveSubscriptionGroups(products: products, productIds: productIds);
-    if (groups.isEmpty) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.unavailable,
-        evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-        productId: fallbackProductId,
-        note: 'no App Store subscription product configured',
-      );
-    }
-
-    final SubscriptionStatusQueryIOS query =
-        subscriptionStatusQuery ?? iap.subscriptionStatusIOS;
-    final List<SubscriptionAccessState> groupStates =
-        <SubscriptionAccessState>[];
-
-    for (final _AppStoreSubscriptionGroup group in groups) {
-      try {
-        final List<SubscriptionStatusIOS> statuses =
-            await query(group.representativeProductId);
-        final List<ActiveSubscription> verifiedEntitlements = subscriptions
-            .where(
-              (subscription) => group.productIds.contains(
-                subscription.productId,
-              ),
-            )
-            .toList(growable: false);
-        groupStates.add(
-          IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatuses(
-            statuses,
-            verifiedEntitlements: verifiedEntitlements,
-            fallbackProductId: group.representativeProductId,
-            now: now,
-          ),
-        );
-      } catch (error) {
-        groupStates.add(
-          SubscriptionAccessState(
-            status: SubscriptionAccessStatus.unavailable,
-            evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-            productId: group.representativeProductId,
-            note: 'StoreKit subscription status unavailable: $error',
-          ),
-        );
-      }
-    }
-
-    return IosSubscriptionHelper.selectMostRelevantAccessState(groupStates);
-  }
-
-  List<_AppStoreSubscriptionGroup> _resolveSubscriptionGroups({
-    required List<ProductSubscription> products,
-    required List<String> productIds,
-  }) {
-    final Set<String> configuredProductIds = productIds.toSet();
-    final Map<String, Set<String>> productIdsByGroup = <String, Set<String>>{};
-
-    for (final ProductSubscriptionIOS product
-        in products.whereType<ProductSubscriptionIOS>()) {
-      if (!configuredProductIds.contains(product.id)) {
-        continue;
-      }
-      final String subscriptionGroupId =
-          (product.subscriptionGroupIdIOS ?? '').trim();
-      final String groupKey = subscriptionGroupId.isEmpty
-          ? 'product:${product.id}'
-          : 'group:$subscriptionGroupId';
-      productIdsByGroup.putIfAbsent(groupKey, () => <String>{}).add(product.id);
-    }
-
-    final Set<String> resolvedProductIds =
-        productIdsByGroup.values.expand((ids) => ids).toSet();
-    for (final String productId in productIds) {
-      if (!resolvedProductIds.contains(productId)) {
-        productIdsByGroup['product:$productId'] = <String>{productId};
-      }
-    }
-
-    return productIdsByGroup.values
-        .map(
-          (ids) => _AppStoreSubscriptionGroup(
-            representativeProductId: ids.first,
-            productIds: ids,
-          ),
-        )
-        .toList(growable: false);
-  }
-
-  @override
-  Future<bool> computeTrialEligibility({
-    required FlutterInappPurchase iap,
-    required List<ProductSubscription> products,
-    required List<String> productIds,
-    void Function(String message)? logger,
-  }) {
-    return IosSubscriptionHelper.computeTrialEligibility(
-      iap: iap,
-      products: products.whereType<ProductSubscriptionIOS>().toList(),
-      subscriptionProductIds: productIds,
-      logger: logger,
-    );
-  }
-
-  @override
-  SubscriptionTransactionPayload transactionPayload(Purchase purchase) {
-    final PurchaseIOS item = purchase as PurchaseIOS;
-    return SubscriptionTransactionPayload(
-      productId: normalizedProductId(item),
-      store: item.store,
-      originalTransactionId: item.originalTransactionIdentifierIOS ?? '',
-      currentTransactionId: item.transactionId,
-      purchaseToken: item.purchaseToken,
-      purchase: item,
-    );
-  }
-}
-
-/// 保存一次 StoreKit 状态查询所覆盖的订阅组商品。
-class _AppStoreSubscriptionGroup {
-  const _AppStoreSubscriptionGroup({
-    required this.representativeProductId,
-    required this.productIds,
-  });
-
-  /// 用于调用 `subscriptionStatusIOS` 的组内代表商品。
-  final String representativeProductId;
-
-  /// 属于该订阅组且由当前应用管理的商品标识。
-  final Set<String> productIds;
-}
-
-/// 负责 Google Play Billing 的购买、签名验证和权益映射。
-///
-/// 规则依据：
-/// https://developer.android.com/google/play/billing/integrate
-/// https://developer.android.com/google/play/billing/security
-/// https://developer.android.com/google/play/billing/lifecycle/subscriptions
-/// https://developer.android.com/google/play/billing/release-notes
-/// https://developer.android.com/reference/com/android/billingclient/api/Purchase#getSignature()
-class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
-  /// 使用 Play Console 公钥创建 Google Play 订阅适配器。
-  const GooglePlaySubscriptionAdapter({this.licenseKey = ''});
-
-  /// Play Console 提供的 Base64 编码 RSA 公钥。
-  final String licenseKey;
-
-  @override
-  bool supportsProduct(ProductSubscription product) =>
-      product is ProductSubscriptionAndroid;
-
-  @override
-  bool supportsPurchase(Purchase purchase) => purchase is PurchaseAndroid;
-
-  @override
-  List<SubscriptionOffer> offersFor(ProductSubscription product) {
-    if (product is! ProductSubscriptionAndroid) {
-      return const <SubscriptionOffer>[];
-    }
-    return AndroidSubscriptionHelper.purchasableOffers(product);
-  }
-
-  @override
-  String normalizedProductId(Purchase purchase) =>
-      AndroidSubscriptionHelper.normalizedProductId(
-        purchase as PurchaseAndroid,
-      );
-
-  @override
-  bool isPending(Purchase purchase) =>
-      purchase is PurchaseAndroid &&
-      AndroidSubscriptionHelper.isPending(purchase);
-
-  @override
-  bool shouldProcessPurchaseUpdate(Purchase purchase) =>
-      purchase is PurchaseAndroid &&
-      AndroidSubscriptionHelper.shouldProcessPurchaseUpdate(purchase);
-
-  @override
-  SubscriptionAccessState? blockingAccessState(Purchase purchase) {
-    if (purchase is! PurchaseAndroid || purchase.isSuspendedAndroid != true) {
-      return null;
-    }
-    return SubscriptionAccessState(
-      status: SubscriptionAccessStatus.billingRetry,
-      evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
-      productId: normalizedProductId(purchase),
-      transactionId: purchase.transactionId ?? purchase.id,
-      note: 'Google Play subscription is suspended',
-    );
-  }
-
-  @override
-  Future<void> requestPurchase({
-    required FlutterInappPurchase iap,
-    required ProductSubscription product,
-    required SubscriptionPurchaseOptions options,
-  }) {
-    if (product is! ProductSubscriptionAndroid) {
-      throw const SubscriptionStoreException(
-        code: 'invalid-product-platform',
-        message: 'The product is not a Google Play subscription.',
-      );
-    }
-    late final SubscriptionOffer offer;
-    try {
-      offer = AndroidSubscriptionHelper.resolvePurchaseOffer(
-        product,
-        requestedOffer: options.offer,
-      );
-    } on AndroidSubscriptionOfferException catch (error) {
-      throw SubscriptionStoreException(
-        code: error.code,
-        message: error.message,
-      );
-    }
-    return iap.requestPurchase(
-      RequestPurchaseProps.subs((
-        apple: null,
-        google: RequestSubscriptionAndroidProps(
-          skus: <String>[product.id],
-          subscriptionOffers: <AndroidSubscriptionOfferInput>[
-            AndroidSubscriptionOfferInput(
-              sku: product.id,
-              offerToken: offer.offerTokenAndroid!,
-            ),
-          ],
-          obfuscatedAccountId: options.obfuscatedAccountIdAndroid,
-          obfuscatedProfileId: options.obfuscatedProfileIdAndroid,
-          isOfferPersonalized: options.isOfferPersonalizedAndroid,
-        ),
-      )),
-    );
-  }
-
-  @override
-  Future<List<Purchase>> restorePurchases(FlutterInappPurchase iap) {
-    return iap.getAvailablePurchases(includeSuspendedAndroid: true);
-  }
-
-  @override
-  Future<void> finishTransaction({
-    required FlutterInappPurchase iap,
-    required Purchase purchase,
-  }) async {
-    final PurchaseAndroid item = purchase as PurchaseAndroid;
-    if (item.isAcknowledgedAndroid == true) {
-      return;
-    }
-    final String token = item.purchaseToken ?? '';
-    if (token.isEmpty) {
-      throw const SubscriptionStoreException(
-        code: 'missing-purchase-token',
-        message: 'Google Play purchase token is required for acknowledgement.',
-      );
-    }
-    final bool acknowledged = await iap.acknowledgePurchaseAndroid(token);
-    if (!acknowledged) {
-      throw const SubscriptionStoreException(
-        code: 'acknowledgement-failed',
-        message: 'Google Play did not acknowledge the subscription purchase.',
-      );
-    }
-  }
-
-  @override
-  Future<void> verifyPurchaseLocally({
-    required FlutterInappPurchase iap,
-    required Purchase purchase,
-  }) async {
-    if (licenseKey.trim().isEmpty) {
-      throw const SubscriptionStoreException(
-        code: 'missing-license-key',
-        message: 'Google Play license key is required for local verification.',
-      );
-    }
-    if (purchase is! PurchaseAndroid ||
-        !AndroidSubscriptionHelper.verifyPurchaseSignature(
-          purchase: purchase,
-          licenseKey: licenseKey,
-        )) {
-      throw const SubscriptionStoreException(
-        code: 'local-verification-failed',
-        message: 'Google Play purchase signature verification failed.',
-      );
-    }
-  }
-
-  @override
-  Future<SubscriptionAccessState> resolveVerifiedAccessState({
-    required FlutterInappPurchase iap,
-    required List<ActiveSubscription> subscriptions,
-    required List<ProductSubscription> products,
-    required List<String> productIds,
-    required String fallbackProductId,
-    DateTime? now,
-  }) async {
-    if (licenseKey.trim().isEmpty) {
-      throw const SubscriptionStoreException(
-        code: 'missing-license-key',
-        message: 'Google Play license key is required for local verification.',
-      );
-    }
-
-    // 查询时包含 suspended 购买，确保账单问题不会被误判为无购买记录。
-    final List<PurchaseAndroid> purchases = (await iap.getAvailablePurchases(
-      includeSuspendedAndroid: true,
-    ))
-        .whereType<PurchaseAndroid>()
-        .where(
-          (purchase) => productIds.contains(normalizedProductId(purchase)),
-        )
-        .toList(growable: false);
-    final List<PurchaseAndroid> verifiedPurchases = purchases
-        .where(
-          (purchase) => AndroidSubscriptionHelper.verifyPurchaseSignature(
-            purchase: purchase,
-            licenseKey: licenseKey,
-          ),
-        )
-        .toList(growable: false);
-
-    // 优先用购买令牌关联两类返回值，旧载荷缺少令牌时才按商品标识关联。
-    final Set<String> verifiedTokens = verifiedPurchases
-        .map((purchase) => purchase.purchaseToken ?? '')
-        .where((token) => token.isNotEmpty)
-        .toSet();
-    final Set<String> verifiedProductIds = verifiedPurchases
-        .map(normalizedProductId)
-        .where((productId) => productId.isNotEmpty)
-        .toSet();
-    final List<ActiveSubscription> verifiedSubscriptions = subscriptions.where(
-      (subscription) {
-        final String token = subscription.purchaseTokenAndroid ??
-            subscription.purchaseToken ??
-            '';
-        return token.isNotEmpty
-            ? verifiedTokens.contains(token)
-            : verifiedProductIds.contains(subscription.productId);
-      },
-    ).toList(growable: false);
-
-    if (verifiedSubscriptions.any((subscription) => subscription.isActive)) {
-      return AndroidSubscriptionHelper
-          .resolveAccessStateFromActiveSubscriptions(
-        verifiedSubscriptions,
-        fallbackProductId: fallbackProductId,
-        now: now,
-      );
-    }
-
-    for (final PurchaseAndroid purchase in verifiedPurchases) {
-      final SubscriptionAccessState? blocked = blockingAccessState(purchase);
-      if (blocked != null) {
-        return blocked;
-      }
-    }
-
-    final bool hasUnverifiedOwnedPurchase = purchases.any(
-      (purchase) =>
-          purchase.purchaseState == PurchaseState.Purchased &&
-          !verifiedPurchases.contains(purchase),
-    );
-    if (hasUnverifiedOwnedPurchase) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.revoked,
-        evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-        productId: fallbackProductId,
-        note: 'Google Play purchase signature verification failed',
-      );
-    }
-
-    return AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-      const <ActiveSubscription>[],
-      fallbackProductId: fallbackProductId,
-      now: now,
-    );
-  }
-
-  @override
-  Future<bool> computeTrialEligibility({
-    required FlutterInappPurchase iap,
-    required List<ProductSubscription> products,
-    required List<String> productIds,
-    void Function(String message)? logger,
-  }) async {
-    final bool eligible = AndroidSubscriptionHelper.hasFreeTrial(
-      products.whereType<ProductSubscriptionAndroid>().toList(),
-    );
-    logger?.call('Google Play eligible offers include free trial: $eligible');
-    return eligible;
-  }
-
-  @override
-  SubscriptionTransactionPayload transactionPayload(Purchase purchase) {
-    final PurchaseAndroid item = purchase as PurchaseAndroid;
-    final String purchaseToken = item.purchaseToken ?? '';
-    return SubscriptionTransactionPayload(
-      productId: normalizedProductId(item),
-      store: item.store,
-      originalTransactionId: purchaseToken,
-      currentTransactionId: item.transactionId ?? item.id,
-      purchaseToken: purchaseToken,
-      packageNameAndroid: item.packageNameAndroid,
-      purchase: item,
-    );
-  }
-}
-
 /// 表示商店适配、验证或交易完成过程中的可分类错误。
 class SubscriptionStoreException implements Exception {
   /// 创建包含稳定错误码和说明的商店异常。
   const SubscriptionStoreException({
-    required this.code,
+    required this.failureCode,
     required this.message,
   });
 
   /// 可供调用方分类处理的错误码。
-  final String code;
+  final SubscriptionFailureCode failureCode;
+  String get code => failureCode.code;
 
   /// 面向日志或调用方的错误说明。
   final String message;

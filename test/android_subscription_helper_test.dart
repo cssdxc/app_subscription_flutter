@@ -76,6 +76,7 @@ PurchaseAndroid _purchase({
     quantity: 1,
     signatureAndroid: signature,
     store: IapStore.Google,
+    storeId: StoreIds.play,
     transactionDate: 1,
     transactionId: 'order-1',
   );
@@ -106,10 +107,13 @@ Future<SubscriptionCoordinator> _androidCoordinator({
     iap: iap,
     storeAdapter: const GooglePlaySubscriptionAdapter(licenseKey: _licenseKey),
     config: SubscriptionCoordinatorConfig(
-      products: const <SubscriptionProductConfig>[
-        SubscriptionProductConfig(
-          id: 'subscribe_month_1',
-          defaultPrice: r'$9.99',
+      plans: const <SubscriptionPlan>[
+        SubscriptionPlan(
+          googlePlay: GooglePlayPlan(
+            basePlanId: 'monthly',
+            productId: 'subscribe_month_1',
+          ),
+          fallbackPrice: r'$9.99',
         ),
       ],
       activeSubscriptionQuery: (_) async => <ActiveSubscription>[
@@ -124,12 +128,14 @@ Future<SubscriptionCoordinator> _androidCoordinator({
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  setUp(FlutterInappPurchase.resetSharedStateForTesting);
+
   test('grants access only for active Google Play subscriptions', () {
     final SubscriptionAccessState state =
         AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-      <ActiveSubscription>[_activeSubscription()],
-      fallbackProductId: 'subscribe_month_1',
-    );
+          <ActiveSubscription>[_activeSubscription()],
+          fallbackProductId: 'subscribe_month_1',
+        );
 
     expect(state.status, SubscriptionAccessStatus.active);
     expect(state.shouldGrantAccess, isTrue);
@@ -198,9 +204,9 @@ void main() {
       () => AndroidSubscriptionHelper.resolvePurchaseOffer(product),
       throwsA(
         isA<AndroidSubscriptionOfferException>().having(
-          (error) => error.code,
-          'code',
-          'offer-required',
+          (error) => error.failureCode,
+          'failureCode',
+          SubscriptionFailureCode.offerRequired,
         ),
       ),
     );
@@ -213,70 +219,54 @@ void main() {
     );
   });
 
-  test('detects free trials from eligible Google Play offers', () {
-    expect(
-      AndroidSubscriptionHelper.hasFreeTrial(<ProductSubscriptionAndroid>[
-        _product(<SubscriptionOffer>[
-          _offer(
-            id: 'trial',
-            token: 'trial-token',
-            paymentMode: PaymentMode.FreeTrial,
-          ),
-        ]),
-      ]),
-      isTrue,
-    );
-  });
+  test(
+    'passes the selected offer token to the Google Play billing flow',
+    () async {
+      final FlutterInappPurchase iap = FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.android),
+      );
+      final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
+        _offer(id: 'trial', token: 'trial-token'),
+      ]);
+      Map<dynamic, dynamic>? purchaseArguments;
 
-  test('passes the selected offer token to the Google Play billing flow',
-      () async {
-    final FlutterInappPurchase iap = FlutterInappPurchase(
-      platform: FakePlatform(operatingSystem: Platform.android),
-    );
-    final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
-      _offer(id: 'trial', token: 'trial-token'),
-    ]);
-    Map<dynamic, dynamic>? purchaseArguments;
-
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'requestPurchase':
-          purchaseArguments = call.arguments as Map<dynamic, dynamic>;
-          return null;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'requestPurchase':
+                purchaseArguments = call.arguments as Map<dynamic, dynamic>;
+                return null;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    await iap.initConnection();
-    await const GooglePlaySubscriptionAdapter().requestPurchase(
-      iap: iap,
-      product: product,
-      options: SubscriptionPurchaseOptions(
-        offer: product.subscriptionOffers.single,
-        obfuscatedAccountIdAndroid: 'account-hash',
-      ),
-    );
+      await iap.initConnection();
+      await const GooglePlaySubscriptionAdapter().requestPurchase(
+        iap: iap,
+        product: product,
+        options: SubscriptionPurchaseOptions(
+          offer: product.subscriptionOffers.single,
+          obfuscatedAccountIdAndroid: 'account-hash',
+        ),
+      );
 
-    expect(purchaseArguments?['type'], 'subs');
-    expect(purchaseArguments?['productId'], 'subscribe_month_1');
-    expect(purchaseArguments?['obfuscatedAccountId'], 'account-hash');
-    expect(
-      purchaseArguments?['subscriptionOffers'],
-      <Map<String, String>>[
+      expect(purchaseArguments?['type'], 'subs');
+      expect(purchaseArguments?['productId'], 'subscribe_month_1');
+      expect(purchaseArguments?['obfuscatedAccountId'], 'account-hash');
+      expect(purchaseArguments?['subscriptionOffers'], <Map<String, String>>[
         <String, String>{
           'sku': 'subscribe_month_1',
           'offerToken': 'trial-token',
         },
-      ],
-    );
-  });
+      ]);
+    },
+  );
 
   test('acknowledges only after local verification succeeds', () async {
     int acknowledgementCalls = 0;
@@ -285,98 +275,120 @@ void main() {
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[_purchase().toJson()];
-        case 'acknowledgePurchaseAndroid':
-          acknowledgementCalls++;
-          return true;
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'getAvailableItems':
+              return <dynamic>[_purchase().toJson()];
+            case 'acknowledgePurchaseAndroid':
+              acknowledgementCalls++;
+              return true;
+            case 'endConnection':
+              return true;
+          }
+          return null;
+        });
     addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_iapChannel, null);
     });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+    final SubscriptionActionResult result = await coordinator.restore(
+      source: 'test',
+    );
 
     expect(result.success, isTrue);
     expect(acknowledgementCalls, 1);
   });
 
-  test('does not acknowledge when local signature verification fails',
-      () async {
-    int acknowledgementCalls = 0;
-    final SubscriptionCoordinator coordinator = await _androidCoordinator();
-    addTearDown(coordinator.dispose);
+  test(
+    'does not acknowledge when local signature verification fails',
+    () async {
+      int acknowledgementCalls = 0;
+      final SubscriptionCoordinator coordinator = await _androidCoordinator();
+      addTearDown(coordinator.dispose);
 
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[
-            _purchase(data: 'modified-purchase-data').toJson(),
-          ];
-        case 'acknowledgePurchaseAndroid':
-          acknowledgementCalls++;
-          return true;
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'getAvailableItems':
+                return <dynamic>[
+                  _purchase(data: 'modified-purchase-data').toJson(),
+                ];
+              case 'acknowledgePurchaseAndroid':
+                acknowledgementCalls++;
+                return true;
+              case 'endConnection':
+                return true;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+      final SubscriptionActionResult result = await coordinator.restore(
+        source: 'test',
+      );
 
-    expect(result.success, isFalse);
-    expect(result.code, 'local-verification-failed');
-    expect(
-        coordinator.accessState.value.status, SubscriptionAccessStatus.revoked);
-    expect(acknowledgementCalls, 0);
-  });
+      expect(result.success, isFalse);
+      expect(
+        result.failureCode,
+        SubscriptionFailureCode.localVerificationFailed,
+      );
+      expect(
+        coordinator.accessState.value.status,
+        SubscriptionAccessStatus.revoked,
+      );
+      expect(acknowledgementCalls, 0);
+    },
+  );
 
-  test('returns a failure when Google Play acknowledgement fails', () async {
-    final SubscriptionCoordinator coordinator = await _androidCoordinator();
-    addTearDown(coordinator.dispose);
+  test(
+    'retries a refused Google Play acknowledgement on the next restore',
+    () async {
+      int acknowledgementCalls = 0;
+      final SubscriptionCoordinator coordinator = await _androidCoordinator();
+      addTearDown(coordinator.dispose);
 
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[_purchase().toJson()];
-        case 'acknowledgePurchaseAndroid':
-          return false;
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'getAvailableItems':
+                return <dynamic>[_purchase().toJson()];
+              case 'acknowledgePurchaseAndroid':
+                acknowledgementCalls++;
+                return acknowledgementCalls > 1;
+              case 'endConnection':
+                return true;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+      final SubscriptionActionResult result = await coordinator.restore(
+        source: 'test',
+      );
 
-    expect(result.success, isFalse);
-    expect(result.code, 'acknowledgement-failed');
-  });
+      expect(result.success, isFalse);
+      expect(result.failureCode, SubscriptionFailureCode.acknowledgementFailed);
+
+      final SubscriptionActionResult retry = await coordinator.restore(
+        source: 'retry',
+      );
+
+      expect(retry.success, isTrue, reason: '${retry.code}: ${retry.message}');
+      expect(acknowledgementCalls, 2);
+    },
+  );
 
   test('blocks overlapping restore operations', () async {
     final Completer<void> releaseFirstQuery = Completer<void>();
@@ -386,174 +398,192 @@ void main() {
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'getAvailableItems':
-          availablePurchaseQueries++;
-          if (availablePurchaseQueries == 1) {
-            await releaseFirstQuery.future;
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'getAvailableItems':
+              availablePurchaseQueries++;
+              if (availablePurchaseQueries == 1) {
+                await releaseFirstQuery.future;
+              }
+              return <dynamic>[];
+            case 'endConnection':
+              return true;
           }
-          return <dynamic>[];
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
+          return null;
+        });
     addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_iapChannel, null);
     });
 
-    final Future<SubscriptionActionResult> firstRestore =
-        coordinator.restore(source: 'first');
+    final Future<SubscriptionActionResult> firstRestore = coordinator.restore(
+      source: 'first',
+    );
     while (availablePurchaseQueries == 0) {
       await Future<void>.delayed(Duration.zero);
     }
-    final SubscriptionActionResult overlappingRestore =
-        await coordinator.restore(source: 'second');
+    final SubscriptionActionResult overlappingRestore = await coordinator
+        .restore(source: 'second');
     releaseFirstQuery.complete();
     await firstRestore;
 
     expect(overlappingRestore.success, isFalse);
-    expect(overlappingRestore.code, 'busy');
+    expect(overlappingRestore.failureCode, SubscriptionFailureCode.busy);
   });
 
-  test('ignores unrelated updates and emits one finished event on error',
-      () async {
-    final List<SubscriptionActionEvent> events = <SubscriptionActionEvent>[];
-    final Completer<void> purchaseRequested = Completer<void>();
-    final SubscriptionCoordinator coordinator = await _androidCoordinator(
-      actionObserver: events.add,
-    );
-    addTearDown(coordinator.dispose);
+  test(
+    'keeps purchase events after another plugin instance connects',
+    () async {
+      final List<SubscriptionActionEvent> events = <SubscriptionActionEvent>[];
+      final Completer<void> purchaseRequested = Completer<void>();
+      final SubscriptionCoordinator coordinator = await _androidCoordinator(
+        actionObserver: events.add,
+      );
+      addTearDown(coordinator.dispose);
 
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'requestPurchase':
-          purchaseRequested.complete();
-          return null;
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'requestPurchase':
+                purchaseRequested.complete();
+                return null;
+              case 'endConnection':
+                return true;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    final Future<SubscriptionActionResult> purchaseFuture =
-        coordinator.purchase(
-      _product(<SubscriptionOffer>[
+      final Future<SubscriptionActionResult> purchaseFuture = coordinator
+          .purchaseProduct(
+            _product(<SubscriptionOffer>[
+              _offer(id: 'base', token: 'base-token'),
+            ]),
+            source: 'test',
+          );
+      bool purchaseCompleted = false;
+      purchaseFuture.whenComplete(() => purchaseCompleted = true);
+      await purchaseRequested.future;
+
+      // 11.x 在其他实例接管原生通道后仍会共享购买事件。
+      final FlutterInappPurchase otherIap = FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.android),
+      );
+      await otherIap.initConnection();
+
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+            _iapChannel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall(
+                'purchase-updated',
+                jsonEncode(_purchase(productId: 'unrelated_product').toJson()),
+              ),
+            ),
+            null,
+          );
+      await Future<void>.delayed(Duration.zero);
+      expect(purchaseCompleted, isFalse);
+
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+            _iapChannel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall(
+                'purchase-error',
+                jsonEncode(<String, Object>{
+                  'code': 'user-cancelled',
+                  'message': 'cancelled',
+                }),
+              ),
+            ),
+            null,
+          );
+      final SubscriptionActionResult result = await purchaseFuture;
+
+      expect(result.cancelled, isTrue);
+      expect(
+        events.where(
+          (event) => event.phase == SubscriptionActionPhase.finished,
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'reconnects after a purchase request reports a disconnected service',
+    () async {
+      final FlutterInappPurchase iap = FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.android),
+      );
+      final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
         _offer(id: 'base', token: 'base-token'),
-      ]),
-      source: 'test',
-    );
-    bool purchaseCompleted = false;
-    purchaseFuture.whenComplete(() => purchaseCompleted = true);
-    await purchaseRequested.future;
-    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .handlePlatformMessage(
-      _iapChannel.name,
-      const StandardMethodCodec().encodeMethodCall(
-        MethodCall(
-          'purchase-updated',
-          jsonEncode(_purchase(productId: 'unrelated_product').toJson()),
-        ),
-      ),
-      null,
-    );
-    await Future<void>.delayed(Duration.zero);
-    expect(purchaseCompleted, isFalse);
+      ]);
+      int initCalls = 0;
+      int requestCalls = 0;
 
-    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .handlePlatformMessage(
-      _iapChannel.name,
-      const StandardMethodCodec().encodeMethodCall(
-        MethodCall(
-          'purchase-error',
-          jsonEncode(<String, Object>{
-            'code': 'user-cancelled',
-            'message': 'cancelled',
-          }),
-        ),
-      ),
-      null,
-    );
-    final SubscriptionActionResult result = await purchaseFuture;
-
-    expect(result.cancelled, isTrue);
-    expect(
-      events.where((event) => event.phase == SubscriptionActionPhase.finished),
-      hasLength(1),
-    );
-  });
-
-  test('reconnects after a purchase request reports a disconnected service',
-      () async {
-    final FlutterInappPurchase iap = FlutterInappPurchase(
-      platform: FakePlatform(operatingSystem: Platform.android),
-    );
-    final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
-      _offer(id: 'base', token: 'base-token'),
-    ]);
-    int initCalls = 0;
-    int requestCalls = 0;
-
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          initCalls++;
-          return true;
-        case 'requestPurchase':
-          requestCalls++;
-          throw PlatformException(code: 'E_SERVICE_DISCONNECTED');
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                initCalls++;
+                return true;
+              case 'requestPurchase':
+                requestCalls++;
+                throw PlatformException(code: 'E_SERVICE_DISCONNECTED');
+              case 'endConnection':
+                return true;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
-      sharedPreferences: prefs,
-      iap: iap,
-      storeAdapter:
-          const GooglePlaySubscriptionAdapter(licenseKey: _licenseKey),
-      config: const SubscriptionCoordinatorConfig(
-        products: <SubscriptionProductConfig>[
-          SubscriptionProductConfig(
-            id: 'subscribe_month_1',
-            defaultPrice: r'$9.99',
-          ),
-        ],
-      ),
-    );
-    addTearDown(coordinator.dispose);
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
+        sharedPreferences: prefs,
+        iap: iap,
+        storeAdapter: const GooglePlaySubscriptionAdapter(
+          licenseKey: _licenseKey,
+        ),
+        config: const SubscriptionCoordinatorConfig(
+          plans: <SubscriptionPlan>[
+            SubscriptionPlan(
+              googlePlay: GooglePlayPlan(
+                basePlanId: 'monthly',
+                productId: 'subscribe_month_1',
+              ),
+              fallbackPrice: r'$9.99',
+            ),
+          ],
+        ),
+      );
+      addTearDown(coordinator.dispose);
 
-    final SubscriptionActionResult first = await coordinator.purchase(
-      product,
-      source: 'first',
-    );
-    final SubscriptionActionResult second = await coordinator.purchase(
-      product,
-      source: 'second',
-    );
+      final SubscriptionActionResult first = await coordinator.purchaseProduct(
+        product,
+        source: 'first',
+      );
+      final SubscriptionActionResult second = await coordinator.purchaseProduct(
+        product,
+        source: 'second',
+      );
 
-    expect(first.success, isFalse);
-    expect(second.success, isFalse);
-    expect(requestCalls, 2);
-    expect(initCalls, 2);
-  });
+      expect(first.success, isFalse);
+      expect(second.success, isFalse);
+      expect(requestCalls, 2);
+      expect(initCalls, 2);
+    },
+  );
 
   test('active entitlement wins over a later suspended restore item', () async {
     final SubscriptionCoordinator coordinator = await _androidCoordinator();
@@ -563,23 +593,24 @@ void main() {
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[active.toJson(), suspended.toJson()];
-        case 'endConnection':
-          return true;
-      }
-      return null;
-    });
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'getAvailableItems':
+              return <dynamic>[active.toJson(), suspended.toJson()];
+            case 'endConnection':
+              return true;
+          }
+          return null;
+        });
     addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_iapChannel, null);
     });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+    final SubscriptionActionResult result = await coordinator.restore(
+      source: 'test',
+    );
 
     expect(result.success, isTrue);
     expect(coordinator.accessState.value.shouldGrantAccess, isTrue);

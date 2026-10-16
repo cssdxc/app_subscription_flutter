@@ -34,17 +34,18 @@ SubscriptionCoordinator _coordinator({
   return SubscriptionCoordinator(
     sharedPreferences: prefs,
     config: SubscriptionCoordinatorConfig(
-      products: const [
-        SubscriptionProductConfig(
-          id: 'subscribe_month_1',
-          defaultPrice: '\$19.99',
+      plans: const [
+        SubscriptionPlan(
+          appStoreProductId: 'subscribe_month_1',
+          fallbackPrice: '\$19.99',
         ),
       ],
       activeSubscriptionQuery: query,
-      subscriptionStatusQueryIOS: subscriptionStatusQueryIOS ??
+      subscriptionStatusQueryIOS:
+          subscriptionStatusQueryIOS ??
           (_) async => <SubscriptionStatusIOS>[
-                SubscriptionStatusIOS(state: storeKitState),
-              ],
+            SubscriptionStatusIOS(state: storeKitState),
+          ],
       transactionReporter: transactionReporter,
     ),
   );
@@ -63,6 +64,7 @@ PurchaseIOS _purchase({
     purchaseState: PurchaseState.Purchased,
     quantity: 1,
     store: IapStore.Apple,
+    storeId: StoreIds.apple,
     transactionDate: DateTime.now().millisecondsSinceEpoch.toDouble(),
     transactionId: transactionId,
     originalTransactionIdentifierIOS: originalTransactionId,
@@ -74,68 +76,74 @@ void main() {
 
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('refreshAccessState updates accessState from active entitlements',
-      () async {
-    SharedPreferences.setMockInitialValues(<String, Object>{});
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    final SubscriptionCoordinator coordinator = _coordinator(
-      prefs: prefs,
-      query: (productIds) async {
-        expect(productIds, <String>['subscribe_month_1']);
-        return <ActiveSubscription>[
-          _activeSubscription(),
-        ];
-      },
-    );
+  test(
+    'refreshAccessState updates accessState from active entitlements',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final SubscriptionCoordinator coordinator = _coordinator(
+        prefs: prefs,
+        query: (productIds) async {
+          expect(productIds, <String>['subscribe_month_1']);
+          return <ActiveSubscription>[_activeSubscription()];
+        },
+      );
 
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+      final SubscriptionAccessState resolvedState = await coordinator
+          .refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.active);
-    expect(
-        coordinator.accessState.value.status, SubscriptionAccessStatus.active);
-    expect(coordinator.isSubscribed.value, isTrue);
-    expect(prefs.getString(cacheKey), isNotNull);
-  });
+      expect(resolvedState.status, SubscriptionAccessStatus.active);
+      expect(
+        coordinator.accessState.value.status,
+        SubscriptionAccessStatus.active,
+      );
+      expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
+      expect(prefs.getString(cacheKey), isNotNull);
+    },
+  );
 
-  test('refreshAccessState falls back to fresh cached snapshot on failure',
-      () async {
-    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
-    SharedPreferences.setMockInitialValues(<String, Object>{
-      cacheKey: jsonEncode(
-        SubscriptionAccessState(
-          status: SubscriptionAccessStatus.active,
-          evaluatedAtMs: cachedAt,
-          effectiveUntilMs: cachedAt + 10000,
-          productId: 'subscribe_month_1',
-          transactionId: 'tx-cache',
-        ).toJson(),
-      ),
-    });
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    int queryCalls = 0;
-    final SubscriptionCoordinator coordinator = _coordinator(
-      prefs: prefs,
-      query: (productIds) async {
-        queryCalls++;
-        throw Exception('offline');
-      },
-    );
+  test(
+    'refreshAccessState falls back to fresh cached snapshot on failure',
+    () async {
+      final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        cacheKey: jsonEncode(
+          SubscriptionAccessState(
+            status: SubscriptionAccessStatus.active,
+            evaluatedAtMs: cachedAt,
+            effectiveUntilMs: cachedAt + 10000,
+            productId: 'subscribe_month_1',
+            transactionId: 'tx-cache',
+          ).toJson(),
+        ),
+      });
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      int queryCalls = 0;
+      final SubscriptionCoordinator coordinator = _coordinator(
+        prefs: prefs,
+        query: (productIds) async {
+          queryCalls++;
+          throw Exception('offline');
+        },
+      );
 
-    await coordinator.loadStoredStatus();
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+      await coordinator.loadStoredStatus();
+      final SubscriptionAccessState resolvedState = await coordinator
+          .refreshAccessState(source: 'test');
 
-    expect(queryCalls, 1);
-    expect(resolvedState.status, SubscriptionAccessStatus.active);
-    expect(
-        coordinator.accessState.value.status, SubscriptionAccessStatus.active);
-    expect(coordinator.isSubscribed.value, isTrue);
+      expect(queryCalls, 1);
+      expect(resolvedState.status, SubscriptionAccessStatus.active);
+      expect(
+        coordinator.accessState.value.status,
+        SubscriptionAccessStatus.active,
+      );
+      expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
 
-    final Map<String, dynamic> storedState =
-        jsonDecode(prefs.getString(cacheKey)!) as Map<String, dynamic>;
-    expect(storedState['evaluatedAtMs'], cachedAt);
-  });
+      final Map<String, dynamic> storedState =
+          jsonDecode(prefs.getString(cacheKey)!) as Map<String, dynamic>;
+      expect(storedState['evaluatedAtMs'], cachedAt);
+    },
+  );
 
   test('refreshAccessState treats empty entitlements as expired', () async {
     SharedPreferences.setMockInitialValues(<String, Object>{});
@@ -146,11 +154,11 @@ void main() {
       storeKitState: 'expired',
     );
 
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+    final SubscriptionAccessState resolvedState = await coordinator
+        .refreshAccessState(source: 'test');
 
     expect(resolvedState.status, SubscriptionAccessStatus.expired);
-    expect(coordinator.isSubscribed.value, isFalse);
+    expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
   test('Apple 过期状态会覆盖本地缓存的宽限期', () async {
@@ -174,12 +182,12 @@ void main() {
     );
 
     await coordinator.loadStoredStatus();
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+    final SubscriptionAccessState resolvedState = await coordinator
+        .refreshAccessState(source: 'test');
 
     expect(resolvedState.status, SubscriptionAccessStatus.expired);
     expect(resolvedState.shouldGrantAccess, isFalse);
-    expect(coordinator.isSubscribed.value, isFalse);
+    expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
   test('Apple 宽限期状态缺少已验证当前权益时不放行', () async {
@@ -203,16 +211,17 @@ void main() {
     );
 
     await coordinator.loadStoredStatus();
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+    final SubscriptionAccessState resolvedState = await coordinator
+        .refreshAccessState(source: 'test');
 
     expect(resolvedState.status, SubscriptionAccessStatus.unavailable);
     expect(resolvedState.shouldGrantAccess, isFalse);
-    expect(coordinator.isSubscribed.value, isFalse);
+    expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
   test('ignores stale cached snapshot after the six hour TTL', () async {
-    final int staleAt = DateTime.now().millisecondsSinceEpoch -
+    final int staleAt =
+        DateTime.now().millisecondsSinceEpoch -
         const Duration(hours: 6).inMilliseconds -
         1;
     SharedPreferences.setMockInitialValues(<String, Object>{
@@ -233,14 +242,16 @@ void main() {
     );
 
     await coordinator.loadStoredStatus();
-    expect(coordinator.accessState.value.status,
-        SubscriptionAccessStatus.unavailable);
+    expect(
+      coordinator.accessState.value.status,
+      SubscriptionAccessStatus.unavailable,
+    );
 
-    final SubscriptionAccessState resolvedState =
-        await coordinator.refreshAccessState(source: 'test');
+    final SubscriptionAccessState resolvedState = await coordinator
+        .refreshAccessState(source: 'test');
 
     expect(resolvedState.status, SubscriptionAccessStatus.unavailable);
-    expect(coordinator.isSubscribed.value, isFalse);
+    expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
   test('refreshes access state when app returns to foreground', () async {
@@ -252,9 +263,7 @@ void main() {
       prefs: prefs,
       query: (productIds) async {
         queryCalls++;
-        return <ActiveSubscription>[
-          _activeSubscription(),
-        ];
+        return <ActiveSubscription>[_activeSubscription()];
       },
     );
     void onStateChanged() {
@@ -273,8 +282,10 @@ void main() {
 
     expect(queryCalls, 1);
     expect(
-        coordinator.accessState.value.status, SubscriptionAccessStatus.active);
-    expect(coordinator.isSubscribed.value, isTrue);
+      coordinator.accessState.value.status,
+      SubscriptionAccessStatus.active,
+    );
+    expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
   });
 
   test('initialization does not synchronize the App Store', () async {
@@ -284,24 +295,25 @@ void main() {
     final SubscriptionCoordinator coordinator = SubscriptionCoordinator(
       sharedPreferences: prefs,
       config: SubscriptionCoordinatorConfig(
-        products: const <SubscriptionProductConfig>[],
+        plans: const <SubscriptionPlan>[],
         activeSubscriptionQuery: (productIds) async => <ActiveSubscription>[],
       ),
     );
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'syncIOS':
-          syncCalls++;
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[];
-      }
-      return null;
-    });
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'restorePurchases':
+            case 'syncIOS':
+              syncCalls++;
+              return true;
+            case 'getAvailableItems':
+              return <dynamic>[];
+          }
+          return null;
+        });
     addTearDown(() async {
       await coordinator.dispose();
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -334,142 +346,154 @@ void main() {
 
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'syncIOS':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[purchase.toJson()];
-        case 'isTransactionVerifiedIOS':
-          return true;
-        case 'finishTransaction':
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'restorePurchases':
+              return true;
+            case 'getAvailableItems':
+              return <dynamic>[purchase.toJson()];
+            case 'isTransactionVerifiedIOS':
+              return true;
+            case 'finishTransaction':
+              return null;
+          }
           return null;
-      }
-      return null;
-    });
+        });
     addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_iapChannel, null);
     });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+    final SubscriptionActionResult result = await coordinator.restore(
+      source: 'test',
+    );
 
-    expect(result.success, isTrue);
+    expect(result.success, isTrue, reason: '${result.code}: ${result.message}');
     expect(reportedPayloads, hasLength(1));
     expect(
-        reportedPayloads.single.currentTransactionId, 'tx-invalid-validation');
-    expect(reportedPayloads.single.originalTransactionId,
-        'original-invalid-validation');
-  });
-
-  test('restore does not report transaction when no item has transactionId',
-      () async {
-    SharedPreferences.setMockInitialValues(<String, Object>{});
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    int reportCalls = 0;
-    final PurchaseIOS purchase = _purchase(
-      id: 'purchase-without-transaction-id',
-      transactionId: '',
-      originalTransactionId: 'original-without-current-tx',
+      reportedPayloads.single.currentTransactionId,
+      'tx-invalid-validation',
     );
-    final SubscriptionCoordinator coordinator = _coordinator(
-      prefs: prefs,
-      query: (productIds) async => <ActiveSubscription>[
-        _activeSubscription(transactionId: ''),
-      ],
-      transactionReporter: (payload) async {
-        reportCalls++;
-      },
+    expect(
+      reportedPayloads.single.originalTransactionId,
+      'original-invalid-validation',
     );
-
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'syncIOS':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[purchase.toJson()];
-        case 'isTransactionVerifiedIOS':
-          return true;
-        case 'finishTransaction':
-          return null;
-      }
-      return null;
-    });
-    addTearDown(() {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
-
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
-
-    expect(result.success, isFalse);
-    expect(reportCalls, 0);
   });
 
   test(
-      'restore does not report transaction when native status is unavailable and only cached access grants entitlement',
-      () async {
-    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
-    SharedPreferences.setMockInitialValues(<String, Object>{
-      cacheKey: jsonEncode(
-        SubscriptionAccessState(
-          status: SubscriptionAccessStatus.active,
-          evaluatedAtMs: cachedAt,
-          effectiveUntilMs: cachedAt + 10000,
-          productId: 'subscribe_month_1',
-          transactionId: 'tx-cache',
-        ).toJson(),
-      ),
-    });
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    int reportCalls = 0;
-    final PurchaseIOS purchase = _purchase(
-      transactionId: 'tx-native-purchase',
-      originalTransactionId: 'original-native-purchase',
-    );
-    final SubscriptionCoordinator coordinator = _coordinator(
-      prefs: prefs,
-      query: (productIds) async => throw Exception('native unavailable'),
-      transactionReporter: (payload) async {
-        reportCalls++;
-      },
-    );
+    'restore does not report transaction when no item has transactionId',
+    () async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      int reportCalls = 0;
+      final PurchaseIOS purchase = _purchase(
+        id: 'purchase-without-transaction-id',
+        transactionId: '',
+        originalTransactionId: 'original-without-current-tx',
+      );
+      final SubscriptionCoordinator coordinator = _coordinator(
+        prefs: prefs,
+        query: (productIds) async => <ActiveSubscription>[
+          _activeSubscription(transactionId: ''),
+        ],
+        transactionReporter: (payload) async {
+          reportCalls++;
+        },
+      );
 
-    await coordinator.loadStoredStatus();
-
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-      switch (call.method) {
-        case 'initConnection':
-          return true;
-        case 'syncIOS':
-          return true;
-        case 'getAvailableItems':
-          return <dynamic>[purchase.toJson()];
-        case 'isTransactionVerifiedIOS':
-          return true;
-        case 'finishTransaction':
-          return null;
-      }
-      return null;
-    });
-    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null);
-    });
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'restorePurchases':
+                return true;
+              case 'getAvailableItems':
+                return <dynamic>[purchase.toJson()];
+              case 'isTransactionVerifiedIOS':
+                return true;
+              case 'finishTransaction':
+                return null;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
 
-    final SubscriptionActionResult result =
-        await coordinator.restore(source: 'test');
+      final SubscriptionActionResult result = await coordinator.restore(
+        source: 'test',
+      );
 
-    expect(result.success, isFalse);
-    expect(
-        coordinator.accessState.value.status, SubscriptionAccessStatus.active);
-    expect(reportCalls, 0);
-  });
+      expect(result.success, isFalse);
+      expect(reportCalls, 0);
+    },
+  );
+
+  test(
+    'restore does not report transaction when native status is unavailable and only cached access grants entitlement',
+    () async {
+      final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+      SharedPreferences.setMockInitialValues(<String, Object>{
+        cacheKey: jsonEncode(
+          SubscriptionAccessState(
+            status: SubscriptionAccessStatus.active,
+            evaluatedAtMs: cachedAt,
+            effectiveUntilMs: cachedAt + 10000,
+            productId: 'subscribe_month_1',
+            transactionId: 'tx-cache',
+          ).toJson(),
+        ),
+      });
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      int reportCalls = 0;
+      final PurchaseIOS purchase = _purchase(
+        transactionId: 'tx-native-purchase',
+        originalTransactionId: 'original-native-purchase',
+      );
+      final SubscriptionCoordinator coordinator = _coordinator(
+        prefs: prefs,
+        query: (productIds) async => throw Exception('native unavailable'),
+        transactionReporter: (payload) async {
+          reportCalls++;
+        },
+      );
+
+      await coordinator.loadStoredStatus();
+
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+            switch (call.method) {
+              case 'initConnection':
+                return true;
+              case 'restorePurchases':
+                return true;
+              case 'getAvailableItems':
+                return <dynamic>[purchase.toJson()];
+              case 'isTransactionVerifiedIOS':
+                return true;
+              case 'finishTransaction':
+                return null;
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null);
+      });
+
+      final SubscriptionActionResult result = await coordinator.restore(
+        source: 'test',
+      );
+
+      expect(result.success, isFalse);
+      expect(
+        coordinator.accessState.value.status,
+        SubscriptionAccessStatus.active,
+      );
+      expect(reportCalls, 0);
+    },
+  );
 }

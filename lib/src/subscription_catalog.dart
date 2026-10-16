@@ -1,21 +1,231 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'android_subscription_helper.dart';
+import 'subscription_failure.dart';
+import 'subscription_plan.dart';
+import 'subscription_price.dart';
+
 /// 管理订阅商品查找和价格展示规则。
 class SubscriptionCatalog {
-  /// 使用配置价格创建商品目录。
-  const SubscriptionCatalog({
-    required this.defaultPrices,
-  });
+  const SubscriptionCatalog();
 
-  /// 商店价格不可用时使用的默认展示价格。
-  final Map<String, String> defaultPrices;
+  /// 精确解析一个跨平台套餐，展示与购买共用这份结果。
+  SubscriptionPlanDetails resolvePlan(
+    SubscriptionPlan plan, {
+    required IapStore store,
+    required List<ProductSubscription> products,
+    SubscriptionTrialEligibility appStoreTrialEligibility =
+        SubscriptionTrialEligibility.unknown,
+  }) {
+    final productId = plan.productIdFor(store);
+    final product = productId == null ? null : findProduct(products, productId);
+    if (product == null) {
+      return SubscriptionPlanDetails(
+        plan: plan,
+        store: store,
+        failureCode: productId == null
+            ? SubscriptionFailureCode.invalidProductPlatform
+            : SubscriptionFailureCode.productNotFound,
+      );
+    }
+    if (store == IapStore.Apple && product is ProductSubscriptionIOS) {
+      final trialOffers = (product.subscriptionOffers ?? <SubscriptionOffer>[])
+          .where(
+            (offer) =>
+                offer.type == DiscountOfferType.Introductory &&
+                offer.paymentMode == PaymentMode.FreeTrial,
+          )
+          .toList();
+      final hasTrial =
+          trialOffers.isNotEmpty ||
+          product.introductoryPricePaymentModeIOS == PaymentModeIOS.FreeTrial;
+      final amount = product.price;
+      return SubscriptionPlanDetails(
+        plan: plan,
+        store: store,
+        product: product,
+        storeDisplayPrice: product.displayPrice.isEmpty
+            ? null
+            : product.displayPrice,
+        price:
+            amount == null ||
+                !amount.isFinite ||
+                amount < 0 ||
+                product.currency.isEmpty ||
+                product.displayPrice.isEmpty
+            ? null
+            : SubscriptionPrice(
+                amount: amount,
+                currencyCode: product.currency,
+                displayPrice: product.displayPrice,
+                period: _appStorePeriod(product),
+              ),
+        trialEligibility: hasTrial
+            ? appStoreTrialEligibility
+            : SubscriptionTrialEligibility.ineligible,
+        trialPeriod: hasTrial
+            ? _appStoreTrialPeriod(product, trialOffers)
+            : null,
+      );
+    }
+    if (store == IapStore.Google && product is ProductSubscriptionAndroid) {
+      final mapping = plan.googlePlay!;
+      final candidates = AndroidSubscriptionHelper.purchasableOffers(product)
+          .where((offer) => offer.basePlanIdAndroid == mapping.basePlanId)
+          .toList();
+      // OpenIAP 原生转换器将普通方案的 id 设为 basePlanId，优惠的 id 设为 offerId。
+      // 必须同时匹配 basePlanId，不能用首个可用优惠猜测套餐。
+      List<SubscriptionOffer> matches = candidates
+          .where((offer) => offer.id == (mapping.offerId ?? mapping.basePlanId))
+          .toList();
+      if (matches.isEmpty &&
+          mapping.offerId != null &&
+          mapping.fallbackToBasePlan) {
+        matches = candidates
+            .where((offer) => offer.id == mapping.basePlanId)
+            .toList();
+      }
+      if (matches.length != 1) {
+        return SubscriptionPlanDetails(
+          plan: plan,
+          store: store,
+          product: product,
+          failureCode: matches.isEmpty
+              ? SubscriptionFailureCode.offerUnavailable
+              : SubscriptionFailureCode.offerRequired,
+        );
+      }
+      final offer = matches.single;
+      final phases =
+          offer.pricingPhasesAndroid?.pricingPhaseList ??
+          <PricingPhaseAndroid>[];
+      final regularPhases = phases
+          .where(
+            (phase) =>
+                SubscriptionRecurrenceMode.fromNative(phase.recurrenceMode) ==
+                SubscriptionRecurrenceMode.infiniteRecurring,
+          )
+          .toList();
+      // 预付方案只有一个不重复阶段，其价格属于预付计费阶段。
+      final phase = regularPhases.length == 1
+          ? regularPhases.single
+          : phases.length == 1 &&
+                SubscriptionRecurrenceMode.fromNative(
+                      phases.single.recurrenceMode,
+                    ) ==
+                    SubscriptionRecurrenceMode.nonRecurring
+          ? phases.single
+          : null;
+      final micros = phase == null
+          ? null
+          : int.tryParse(phase.priceAmountMicros);
+      final trials = phases
+          .where(
+            (phase) =>
+                int.tryParse(phase.priceAmountMicros) == 0 &&
+                SubscriptionRecurrenceMode.fromNative(phase.recurrenceMode) ==
+                    SubscriptionRecurrenceMode.finiteRecurring,
+          )
+          .toList();
+      SubscriptionPeriod? trialPeriod;
+      if (trials.length == 1) {
+        final trial = trials.single;
+        final period = SubscriptionPrice.parseBillingPeriod(
+          trial.billingPeriod,
+        );
+        if (period != null && trial.billingCycleCount > 0) {
+          trialPeriod = SubscriptionPeriod(
+            unit: period.unit,
+            value: period.value * trial.billingCycleCount,
+          );
+        }
+      }
+      return SubscriptionPlanDetails(
+        plan: plan,
+        store: store,
+        product: product,
+        offer: offer,
+        storeDisplayPrice: phase == null || phase.formattedPrice.isEmpty
+            ? null
+            : phase.formattedPrice,
+        price:
+            phase == null ||
+                micros == null ||
+                micros < 0 ||
+                phase.priceCurrencyCode.isEmpty ||
+                phase.formattedPrice.isEmpty
+            ? null
+            : SubscriptionPrice(
+                amount: micros / 1000000,
+                currencyCode: phase.priceCurrencyCode,
+                displayPrice: phase.formattedPrice,
+                period: SubscriptionPrice.parseBillingPeriod(
+                  phase.billingPeriod,
+                ),
+                recurrenceMode: SubscriptionRecurrenceMode.fromNative(
+                  phase.recurrenceMode,
+                ),
+              ),
+        trialEligibility: trials.isNotEmpty
+            ? SubscriptionTrialEligibility.eligible
+            : phases.isEmpty
+            ? SubscriptionTrialEligibility.unknown
+            : SubscriptionTrialEligibility.ineligible,
+        trialPeriod: trialPeriod,
+      );
+    }
+    return SubscriptionPlanDetails(
+      plan: plan,
+      store: store,
+      failureCode: SubscriptionFailureCode.invalidProductPlatform,
+    );
+  }
 
-  /// 已配置的全部订阅商品标识。
-  List<String> get productIds => defaultPrices.keys.toList(growable: false);
+  SubscriptionPeriod? _appStoreTrialPeriod(
+    ProductSubscriptionIOS product,
+    List<SubscriptionOffer> offers,
+  ) {
+    if (offers.length == 1) {
+      final offer = offers.single;
+      final period = offer.period;
+      final count = offer.periodCount ?? offer.numberOfPeriodsIOS;
+      if (period != null &&
+          period.value > 0 &&
+          period.unit != SubscriptionPeriodUnit.Unknown &&
+          count != null &&
+          count > 0) {
+        return SubscriptionPeriod(
+          unit: period.unit,
+          value: period.value * count,
+        );
+      }
+    }
+    // OpenIAP Apple 4.0.3 已将此字段转换为归一化单位下的总周期数。
+    final count = int.tryParse(
+      product.introductoryPriceNumberOfPeriodsIOS ?? '',
+    );
+    final unit = _appStoreUnit(product.introductoryPriceSubscriptionPeriodIOS);
+    return count == null || count <= 0 || unit == SubscriptionPeriodUnit.Unknown
+        ? null
+        : SubscriptionPeriod(unit: unit, value: count);
+  }
 
-  /// 查找指定商品的默认展示价格。
-  String findDefaultPrice(String productId) {
-    return defaultPrices[productId] ?? '';
+  SubscriptionPeriodUnit _appStoreUnit(SubscriptionPeriodIOS? unit) =>
+      switch (unit) {
+        SubscriptionPeriodIOS.Day => SubscriptionPeriodUnit.Day,
+        SubscriptionPeriodIOS.Week => SubscriptionPeriodUnit.Week,
+        SubscriptionPeriodIOS.Month => SubscriptionPeriodUnit.Month,
+        SubscriptionPeriodIOS.Year => SubscriptionPeriodUnit.Year,
+        _ => SubscriptionPeriodUnit.Unknown,
+      };
+
+  SubscriptionPeriod? _appStorePeriod(ProductSubscriptionIOS product) {
+    final count = int.tryParse(product.subscriptionPeriodNumberIOS ?? '');
+    if (count == null || count <= 0) return null;
+    final unit = _appStoreUnit(product.subscriptionPeriodUnitIOS);
+    return unit == SubscriptionPeriodUnit.Unknown
+        ? null
+        : SubscriptionPeriod(unit: unit, value: count);
   }
 
   /// 从已加载商品中查找指定商品。
@@ -29,92 +239,5 @@ class SubscriptionCatalog {
       }
     }
     return null;
-  }
-
-  /// 优先返回商店展示价格，缺失时依次使用配置价格和调用方兜底价格。
-  String findDisplayPrice(
-    List<ProductSubscription> products,
-    String productId,
-    String fallbackPrice,
-  ) {
-    final ProductSubscription? product = findProduct(products, productId);
-    final String displayPrice =
-        product?.displayPrice ?? findDefaultPrice(productId);
-    return displayPrice.isNotEmpty ? displayPrice : fallbackPrice;
-  }
-
-  /// 将年订阅价格换算为每周展示价格。
-  String yearlyPricePerWeek(
-    List<ProductSubscription> products, {
-    required String productId,
-    required String fallbackPrice,
-    required String weekLabel,
-  }) {
-    if (productId.isEmpty) {
-      return '$fallbackPrice / $weekLabel';
-    }
-
-    final ProductSubscription? product = findProduct(products, productId);
-    if (product == null) {
-      return '$fallbackPrice / $weekLabel';
-    }
-
-    final double? rawPrice = product.price;
-    if (rawPrice == null) {
-      return '$fallbackPrice / $weekLabel';
-    }
-
-    final double weeklyPrice = rawPrice / 52.0;
-    final String displayPrice =
-        product.displayPrice.isNotEmpty ? product.displayPrice : fallbackPrice;
-    final String weeklyDisplayPrice =
-        _replaceDisplayPriceAmount(displayPrice, weeklyPrice);
-    return '$weeklyDisplayPrice / $weekLabel';
-  }
-
-  String _replaceDisplayPriceAmount(String displayPrice, double amount) {
-    final RegExp amountPattern = RegExp(r'\d(?:[\d.,，]|\s(?=\d))*');
-    final RegExpMatch? match = amountPattern.firstMatch(displayPrice);
-    if (match == null) {
-      return amount.toStringAsFixed(2);
-    }
-
-    final String originalAmount = match.group(0)!;
-    final String formattedAmount = _formatAmountLike(originalAmount, amount);
-    return displayPrice.replaceRange(match.start, match.end, formattedAmount);
-  }
-
-  String _formatAmountLike(String originalAmount, double amount) {
-    final String decimalSeparator = _decimalSeparatorOf(originalAmount);
-    final String formatted = amount.toStringAsFixed(2);
-    if (decimalSeparator == ',') {
-      return formatted.replaceAll('.', ',');
-    }
-    return formatted;
-  }
-
-  String _decimalSeparatorOf(String amount) {
-    final int lastDot = amount.lastIndexOf('.');
-    final int lastComma = amount.lastIndexOf(',');
-    final int lastFullWidthComma = amount.lastIndexOf('，');
-    final int lastCommaLike =
-        lastComma > lastFullWidthComma ? lastComma : lastFullWidthComma;
-
-    if (lastCommaLike > lastDot && _digitsAfter(amount, lastCommaLike) == 2) {
-      return ',';
-    }
-    return '.';
-  }
-
-  int _digitsAfter(String value, int index) {
-    int count = 0;
-    for (int i = index + 1; i < value.length; i++) {
-      final int codeUnit = value.codeUnitAt(i);
-      if (codeUnit < 0x30 || codeUnit > 0x39) {
-        continue;
-      }
-      count++;
-    }
-    return count;
   }
 }

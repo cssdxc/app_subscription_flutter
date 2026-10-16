@@ -19,6 +19,9 @@ enum SubscriptionAccessStatus {
   unavailable,
 }
 
+/// 与日志说明分开的可判定状态原因。
+enum SubscriptionAccessReason { noCurrentSubscription }
+
 /// 订阅模块对外提供的统一权益快照。
 class SubscriptionAccessState {
   /// 创建一份不可变的订阅权益快照。
@@ -29,6 +32,7 @@ class SubscriptionAccessState {
     this.productId = '',
     this.transactionId = '',
     this.note,
+    this.reason,
   });
 
   /// 当前权益状态。
@@ -48,6 +52,7 @@ class SubscriptionAccessState {
 
   /// 供日志和诊断使用的状态说明。
   final String? note;
+  final SubscriptionAccessReason? reason;
 
   /// 是否应向用户授予订阅权益。
   bool get shouldGrantAccess =>
@@ -63,6 +68,7 @@ class SubscriptionAccessState {
       'productId': productId,
       'transactionId': transactionId,
       'note': note,
+      'reason': reason?.name,
     };
   }
 
@@ -79,6 +85,10 @@ class SubscriptionAccessState {
       productId: json['productId']?.toString() ?? '',
       transactionId: json['transactionId']?.toString() ?? '',
       note: json['note']?.toString(),
+      reason:
+          json['reason'] == SubscriptionAccessReason.noCurrentSubscription.name
+          ? SubscriptionAccessReason.noCurrentSubscription
+          : null,
     );
   }
 
@@ -90,6 +100,7 @@ class SubscriptionAccessState {
     String? productId,
     String? transactionId,
     String? note,
+    SubscriptionAccessReason? reason,
   }) {
     return SubscriptionAccessState(
       status: status ?? this.status,
@@ -98,6 +109,7 @@ class SubscriptionAccessState {
       productId: productId ?? this.productId,
       transactionId: transactionId ?? this.transactionId,
       note: note ?? this.note,
+      reason: reason ?? this.reason,
     );
   }
 }

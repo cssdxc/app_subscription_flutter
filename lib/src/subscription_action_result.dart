@@ -1,5 +1,10 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'subscription_failure.dart';
+
+/// 一次操作的互斥结果，调用方使用 switch 处理。
+enum SubscriptionActionOutcome { success, cancelled, pending, failure }
+
 /// 订阅操作的业务类型。
 enum SubscriptionActionType {
   /// 发起购买。
@@ -14,54 +19,39 @@ enum SubscriptionActionType {
 
 /// 一次购买、恢复或同步操作的统一结果。
 class SubscriptionActionResult {
-  /// 创建一次订阅操作结果。
   const SubscriptionActionResult({
     required this.type,
-    required this.success,
+    required this.outcome,
     this.silent = false,
-    this.cancelled = false,
-    this.pending = false,
     this.productId,
-    this.code,
+    this.failureCode,
+    this.storeErrorCode,
     this.message,
     this.purchase,
     this.restoredCount = 0,
   });
 
-  /// 操作类型。
   final SubscriptionActionType type;
-
-  /// 操作是否成功完成。
-  final bool success;
-
-  /// 是否为不应触发交互提示的静默操作。
+  final SubscriptionActionOutcome outcome;
   final bool silent;
-
-  /// 用户是否主动取消了操作。
-  final bool cancelled;
-
-  /// 交易是否仍处于待处理状态。
-  final bool pending;
-
-  /// 本次操作关联的商品标识。
   final String? productId;
 
-  /// 可供调用方分类处理的错误码。
-  final String? code;
+  /// 库自身的失败原因，与商店错误分开。
+  final SubscriptionFailureCode? failureCode;
 
-  /// 商店或订阅模块返回的结果说明。
+  /// 插件提供的商店错误，保持官方枚举语义。
+  final ErrorCode? storeErrorCode;
   final String? message;
-
-  /// 本次操作关联的原始购买对象。
   final Purchase? purchase;
-
-  /// 恢复流程中发现并处理的购买数量。
   final int restoredCount;
 
-  /// 操作是否失败。
-  bool get failed => !success;
+  /// 只用于日志或上报，不用于业务分支判断。
+  String? get code => failureCode?.code ?? storeErrorCode?.value;
+  bool get success => outcome == SubscriptionActionOutcome.success;
+  bool get cancelled => outcome == SubscriptionActionOutcome.cancelled;
+  bool get pending => outcome == SubscriptionActionOutcome.pending;
+  bool get failed => outcome == SubscriptionActionOutcome.failure;
 
-  /// 创建成功结果。
   factory SubscriptionActionResult.success({
     required SubscriptionActionType type,
     bool silent = false,
@@ -69,41 +59,80 @@ class SubscriptionActionResult {
     Purchase? purchase,
     int restoredCount = 0,
     String? message,
-  }) {
-    return SubscriptionActionResult(
-      type: type,
-      success: true,
-      silent: silent,
-      productId: productId,
-      purchase: purchase,
-      restoredCount: restoredCount,
-      message: message,
-    );
-  }
+  }) => SubscriptionActionResult(
+    type: type,
+    outcome: SubscriptionActionOutcome.success,
+    silent: silent,
+    productId: productId,
+    purchase: purchase,
+    restoredCount: restoredCount,
+    message: message,
+  );
 
-  /// 创建失败、取消或待处理结果。
   factory SubscriptionActionResult.failure({
     required SubscriptionActionType type,
     bool silent = false,
     String? productId,
-    String? code,
+    SubscriptionFailureCode? failureCode,
+    ErrorCode? storeErrorCode,
     String? message,
-    bool cancelled = false,
-    bool pending = false,
     Purchase? purchase,
     int restoredCount = 0,
-  }) {
-    return SubscriptionActionResult(
-      type: type,
-      success: false,
-      silent: silent,
-      cancelled: cancelled,
-      pending: pending,
-      productId: productId,
-      code: code,
-      message: message,
-      purchase: purchase,
-      restoredCount: restoredCount,
-    );
-  }
+  }) => SubscriptionActionResult(
+    type: type,
+    outcome: storeErrorCode == ErrorCode.UserCancelled
+        ? SubscriptionActionOutcome.cancelled
+        : failureCode == SubscriptionFailureCode.purchasePending ||
+              storeErrorCode == ErrorCode.DeferredPayment ||
+              storeErrorCode == ErrorCode.Pending
+        ? SubscriptionActionOutcome.pending
+        : SubscriptionActionOutcome.failure,
+    silent: silent,
+    productId: productId,
+    failureCode: failureCode,
+    storeErrorCode: storeErrorCode,
+    message: message,
+    purchase: purchase,
+    restoredCount: restoredCount,
+  );
+}
+
+/// 订阅操作事件所处的阶段。
+enum SubscriptionActionPhase {
+  /// 操作已经开始。
+  started,
+
+  /// 操作已经结束。
+  finished,
+}
+
+/// 提供给宿主应用埋点或加载态管理的订阅操作事件。
+class SubscriptionActionEvent {
+  /// 创建一个订阅操作生命周期事件。
+  const SubscriptionActionEvent({
+    required this.phase,
+    required this.type,
+    required this.source,
+    this.silent = false,
+    this.productId,
+    this.result,
+  });
+
+  /// 当前事件阶段。
+  final SubscriptionActionPhase phase;
+
+  /// 当前操作类型。
+  final SubscriptionActionType type;
+
+  /// 调用方传入的操作来源标识。
+  final String source;
+
+  /// 是否为静默操作。
+  final bool silent;
+
+  /// 操作关联的商品标识。
+  final String? productId;
+
+  /// 结束事件对应的操作结果；开始事件为空。
+  final SubscriptionActionResult? result;
 }

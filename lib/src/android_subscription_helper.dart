@@ -12,25 +12,15 @@ import 'package:pointycastle/digests/sha1.dart';
 import 'package:pointycastle/signers/rsa_signer.dart';
 
 import 'subscription_access_state.dart';
+import 'subscription_failure.dart';
 
 /// 提供 Google Play 订阅字段归一化、签名验证和 offer 选择规则。
 class AndroidSubscriptionHelper {
   const AndroidSubscriptionHelper._();
 
   /// 从购买对象中解析稳定的商品标识。
-  static String normalizedProductId(PurchaseAndroid? item) {
-    if (item == null) {
-      return '';
-    }
-
-    final String productId = item.productId.trim();
-    if (productId.isNotEmpty && productId != '0') {
-      return productId;
-    }
-
-    final List<String> ids = item.ids ?? const <String>[];
-    return ids.isEmpty ? '' : ids.first.trim();
-  }
+  static String normalizedProductId(PurchaseAndroid item) =>
+      item.productId.trim();
 
   /// 判断购买是否仍在等待用户或商店处理。
   static bool isPending(PurchaseAndroid item) =>
@@ -60,10 +50,8 @@ class AndroidSubscriptionHelper {
     try {
       // 签名只能证明原始购买数据未被篡改，仍需校验购买令牌、商品和包名。
       final RSAPublicKey publicKey = _parseLicenseKey(licenseKey);
-      final Signer verifier = RSASigner(
-        SHA1Digest(),
-        '06052b0e03021a',
-      )..init(false, PublicKeyParameter<RSAPublicKey>(publicKey));
+      final Signer verifier = RSASigner(SHA1Digest(), '06052b0e03021a')
+        ..init(false, PublicKeyParameter<RSAPublicKey>(publicKey));
       final bool signatureIsValid = verifier.verifySignature(
         Uint8List.fromList(utf8.encode(purchaseData)),
         RSASignature(Uint8List.fromList(base64.decode(signature))),
@@ -119,8 +107,9 @@ class AndroidSubscriptionHelper {
     }
 
     final ASN1BitString publicKeyBits = topLevel[1] as ASN1BitString;
-    final Uint8List rsaKeyBytes =
-        Uint8List.fromList(publicKeyBits.stringValues ?? const <int>[]);
+    final Uint8List rsaKeyBytes = Uint8List.fromList(
+      publicKeyBits.stringValues ?? const <int>[],
+    );
     final ASN1Sequence rsaKey =
         ASN1Parser(rsaKeyBytes).nextObject() as ASN1Sequence;
     final List<Object?> keyParts = rsaKey.elements ?? const [];
@@ -168,6 +157,7 @@ class AndroidSubscriptionHelper {
         evaluatedAtMs: nowMs,
         productId: fallbackProductId,
         note: 'no active Google Play subscription',
+        reason: SubscriptionAccessReason.noCurrentSubscription,
       );
     }
 
@@ -208,7 +198,7 @@ class AndroidSubscriptionHelper {
         }
       }
       throw const AndroidSubscriptionOfferException(
-        code: 'invalid-offer',
+        failureCode: SubscriptionFailureCode.invalidOffer,
         message:
             'The selected Google Play offer does not belong to the product.',
       );
@@ -219,22 +209,13 @@ class AndroidSubscriptionHelper {
     }
     if (offers.isEmpty) {
       throw const AndroidSubscriptionOfferException(
-        code: 'offer-unavailable',
+        failureCode: SubscriptionFailureCode.offerUnavailable,
         message: 'No eligible Google Play subscription offer is available.',
       );
     }
     throw const AndroidSubscriptionOfferException(
-      code: 'offer-required',
+      failureCode: SubscriptionFailureCode.offerRequired,
       message: 'Select a Google Play base plan or offer before purchasing.',
-    );
-  }
-
-  /// 判断商品列表中是否包含免费试用 offer。
-  static bool hasFreeTrial(List<ProductSubscriptionAndroid> products) {
-    return products.any(
-      (product) => product.subscriptionOffers.any(
-        (offer) => offer.paymentMode == PaymentMode.FreeTrial,
-      ),
     );
   }
 }
@@ -243,12 +224,13 @@ class AndroidSubscriptionHelper {
 class AndroidSubscriptionOfferException implements Exception {
   /// 创建包含稳定错误码和说明的 offer 异常。
   const AndroidSubscriptionOfferException({
-    required this.code,
+    required this.failureCode,
     required this.message,
   });
 
   /// 可供调用方分类处理的错误码。
-  final String code;
+  final SubscriptionFailureCode failureCode;
+  String get code => failureCode.code;
 
   /// 面向日志或调用方的错误说明。
   final String message;
