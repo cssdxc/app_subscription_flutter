@@ -53,7 +53,7 @@ class SubscriptionPrice {
       symbol: currencySymbol,
       decimalDigits: decimalDigits,
     );
-    return '${format.format(amount / divisor)} / $unitLabel';
+    return '${format.format(amount / divisor)}/$unitLabel';
   }
 
   /// Play 单一日期单位的 ISO 8601 周期；无法表达的组合保留为未知。

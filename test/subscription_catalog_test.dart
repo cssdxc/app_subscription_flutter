@@ -380,11 +380,11 @@ void main() {
         unitLabel: 'week',
         currencySymbol: r'$',
       ),
-      r'$1.00 / week',
+      r'$1.00/week',
     );
     expect(
       usd.averagePrice(divisor: 52, locale: 'en_US', unitLabel: 'week'),
-      'USD1.00 / week',
+      'USD1.00/week',
     );
     const eur = SubscriptionPrice(
       amount: 1299.99,
@@ -398,7 +398,7 @@ void main() {
         unitLabel: 'Woche',
         currencySymbol: '€',
       ),
-      '25,00\u00a0€ / Woche',
+      '25,00\u00a0€/Woche',
     );
     const jpy = SubscriptionPrice(
       amount: 5200,
@@ -407,7 +407,7 @@ void main() {
     );
     expect(
       jpy.averagePrice(divisor: 52, locale: 'en_US', unitLabel: 'week'),
-      'JPY100 / week',
+      'JPY100/week',
     );
     const kwd = SubscriptionPrice(
       amount: 52.052,
@@ -416,7 +416,7 @@ void main() {
     );
     expect(
       kwd.averagePrice(divisor: 52, locale: 'en_US', unitLabel: 'week'),
-      'KWD1.001 / week',
+      'KWD1.001/week',
     );
     expect(
       () => usd.averagePrice(divisor: 0, locale: 'en_US', unitLabel: 'week'),

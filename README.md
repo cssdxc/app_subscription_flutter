@@ -108,7 +108,7 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `1.0.5`，公共接口不提供旧接口兼容层。
+当前 Git 发布版本为 `1.0.6`，公共接口不提供旧接口兼容层。
 接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
 
 ```yaml
@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 1.0.5
+      ref: 1.0.6
 ```
 
 ### 1. 配置逻辑套餐
@@ -213,6 +213,7 @@ final trialDays = yearly.trialDays;
   原始阶段仍可从 `details.offer` 获取，交由宿主明确处理。
 - 平均价直接使用商店数值，按 `intl` 的币种小数位和宿主 locale 格式化，不解析或替换展示字符串。
   默认显示 ISO 货币代码；可显式传入货币符号、小数位。JPY 的零位、KWD 的三位均遵循币种规则。
+  金额与单位使用 `/` 直接连接，例如 `$1.00/week`，保留币种本地化格式本身的间距。
 - 除数必须由宿主明确给出。年价除以 52 是展示约定，不是按每周扣款，也不能据此计算到期时间。
   没有真实数值价格时 `price == null`，不计算兜底字符串的平均价。
 
