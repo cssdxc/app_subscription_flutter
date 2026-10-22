@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:app_subscription_core/src/ios_subscription_helper.dart';
 import 'package:app_subscription_core/src/subscription_operation_state.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
@@ -74,6 +75,177 @@ void main() {
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_channel, null);
+  });
+
+  for (final method in [
+    'fetchProducts',
+    'getActiveSubscriptions',
+    'getAvailableItems',
+  ]) {
+    for (final disconnected in [false, true]) {
+      test('$method ${disconnected ? '连接中断后重连' : '超时不关闭连接'}', () async {
+        SharedPreferences.setMockInitialValues({});
+        var connections = 0;
+        var disconnections = 0;
+        var failQuery = false;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_channel, (call) async {
+              switch (call.method) {
+                case 'initConnection':
+                  connections++;
+                  return true;
+                case 'endConnection':
+                  disconnections++;
+                  return true;
+                case 'fetchProducts':
+                case 'getActiveSubscriptions':
+                case 'getAvailableItems':
+                  if (failQuery && call.method == method) {
+                    throw PlatformException(
+                      code: disconnected
+                          ? ErrorCode.ServiceDisconnected.value
+                          : ErrorCode.ServiceTimeout.value,
+                    );
+                  }
+                  return [];
+              }
+              return null;
+            });
+        final coordinator = SubscriptionCoordinator(
+          iap: FlutterInappPurchase(
+            platform: FakePlatform(
+              operatingSystem: method == 'getAvailableItems'
+                  ? Platform.android
+                  : Platform.iOS,
+            ),
+          ),
+          config: SubscriptionCoordinatorConfig(
+            plans: const [
+              SubscriptionPlan(
+                appStoreProductId: 'monthly',
+                googlePlay: GooglePlayPlan(
+                  productId: 'subscription',
+                  basePlanId: 'monthly',
+                ),
+              ),
+            ],
+            googlePlayLicenseKeyAndroid: 'unused-without-purchases',
+            subscriptionStatusQueryIOS: (_) async => [],
+          ),
+        );
+        addTearDown(coordinator.dispose);
+        await coordinator.init();
+        failQuery = true;
+        if (method == 'fetchProducts') {
+          expect(await coordinator.loadProducts(force: true), false);
+        } else {
+          await coordinator.refreshAccessState();
+        }
+        expect(disconnections, disconnected ? 1 : 0);
+        failQuery = false;
+        await coordinator.loadProducts(force: true);
+        expect(connections, disconnected ? 2 : 1);
+      });
+    }
+  }
+
+  test('购买前商品查询失败保留商店错误码，不改成连接不可用', () async {
+    var failQuery = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              if (failQuery)
+                throw PlatformException(code: ErrorCode.ItemUnavailable.value);
+              return [_appleProduct().toJson()];
+            case 'requestPurchase':
+              fail('商品查询失败时不应发起购买');
+          }
+          return null;
+        });
+    final coordinator = await _create();
+    await coordinator.init();
+    failQuery = true;
+    final result = await coordinator.purchasePlan(_applePlan, source: 'test');
+    expect(result.storeErrorCode, ErrorCode.ItemUnavailable);
+    expect(result.failureCode, isNull);
+    expect(coordinator.activity.value.isLoading, false);
+  });
+
+  for (final closing in [false, true]) {
+    test(closing ? '关闭失效连接完成后，后续查询才重新连接' : '插件通知连接断开后，下一次查询直接重新连接', () async {
+      var connections = 0;
+      final closingStarted = Completer<void>();
+      final releaseClose = Completer<void>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            switch (call.method) {
+              case 'initConnection':
+                connections++;
+                return true;
+              case 'fetchProducts':
+                return [];
+              case 'endConnection':
+                if (closing && !closingStarted.isCompleted) {
+                  closingStarted.complete();
+                  await releaseClose.future;
+                }
+                return true;
+            }
+            return null;
+          });
+      final coordinator = await _create();
+      await coordinator.init();
+      await _emit(
+        closing ? 'purchase-error' : 'connection-updated',
+        closing
+            ? {'code': ErrorCode.ServiceDisconnected.value, 'message': '服务断开'}
+            : {'connected': false},
+      );
+      if (closing) await closingStarted.future;
+      var completed = false;
+      final loading = coordinator.loadProducts(force: true).then((value) {
+        completed = true;
+        return value;
+      });
+      if (closing) {
+        await Future<void>.delayed(Duration.zero);
+        expect(completed, false);
+        releaseClose.complete();
+      }
+      expect(await loading, true);
+      expect(connections, 2);
+    });
+  }
+
+  test('恢复连接失败后不为刷新权益立即重复连接', () async {
+    SharedPreferences.setMockInitialValues({});
+    var connections = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          if (call.method == 'initConnection') {
+            connections++;
+            return false;
+          }
+          return null;
+        });
+    final coordinator = SubscriptionCoordinator(
+      iap: FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.iOS),
+      ),
+      config: const SubscriptionCoordinatorConfig(plans: [_applePlan]),
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.init();
+    connections = 0;
+    expect(
+      (await coordinator.restore()).failureCode,
+      SubscriptionFailureCode.storeUnavailable,
+    );
+    expect(connections, 1);
   });
 
   test('初始化和商品加载合并并发请求，套餐快照在资格查询后更新', () async {
@@ -437,7 +609,8 @@ void main() {
       _applePlan,
       source: 'refresh_failed',
     );
-    expect(result.failureCode, SubscriptionFailureCode.storeUnavailable);
+    expect(result.storeErrorCode, ErrorCode.NetworkError);
+    expect(result.failureCode, isNull);
     expect(purchaseRequests, 0);
     expect(coordinator.activity.value.isLoading, isFalse);
   });

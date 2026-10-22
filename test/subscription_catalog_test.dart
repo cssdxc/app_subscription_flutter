@@ -358,4 +358,17 @@ void main() {
     expect(SubscriptionPrice.parseBillingPeriod('P0D'), isNull);
     expect(SubscriptionPrice.parseBillingPeriod('PT1H'), isNull);
   });
+
+  test('协调器不把未注册的套餐标为可购买，即使商品标识相同', () {
+    const registered = SubscriptionPlan(appStoreProductId: 'yearly');
+    final coordinator = SubscriptionCoordinator(
+      config: const SubscriptionCoordinatorConfig(plans: [registered]),
+    );
+    addTearDown(coordinator.dispose);
+    final unregistered = SubscriptionPlan(appStoreProductId: 'yearly');
+    expect(
+      coordinator.planDetails(unregistered).failureCode,
+      SubscriptionFailureCode.planNotConfigured,
+    );
+  });
 }

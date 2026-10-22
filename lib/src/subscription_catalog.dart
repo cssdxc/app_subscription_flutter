@@ -1,6 +1,5 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
-import 'android_subscription_helper.dart';
 import 'subscription_failure.dart';
 import 'subscription_plan.dart';
 import 'subscription_price.dart';
@@ -70,8 +69,12 @@ class SubscriptionCatalog {
     }
     if (store == IapStore.Google && product is ProductSubscriptionAndroid) {
       final mapping = plan.googlePlay!;
-      final candidates = AndroidSubscriptionHelper.purchasableOffers(product)
-          .where((offer) => offer.basePlanIdAndroid == mapping.basePlanId)
+      final candidates = product.subscriptionOffers
+          .where(
+            (offer) =>
+                (offer.offerTokenAndroid ?? '').isNotEmpty &&
+                offer.basePlanIdAndroid == mapping.basePlanId,
+          )
           .toList();
       // OpenIAP 原生转换器将普通方案的 id 设为 basePlanId，优惠的 id 设为 offerId。
       // 必须同时匹配 basePlanId，不能用首个可用优惠猜测套餐。

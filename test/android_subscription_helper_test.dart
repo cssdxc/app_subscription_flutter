@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:app_subscription_core/src/android_subscription_helper.dart';
+import 'package:app_subscription_core/src/google_play_subscription_adapter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -96,6 +98,7 @@ ActiveSubscription _activeSubscription() {
 
 Future<SubscriptionCoordinator> _androidCoordinator({
   SubscriptionActionObserver? actionObserver,
+  ActiveSubscriptionQuery? query,
 }) async {
   SharedPreferences.setMockInitialValues(<String, Object>{});
   final SharedPreferences preferences = await SharedPreferences.getInstance();
@@ -116,9 +119,8 @@ Future<SubscriptionCoordinator> _androidCoordinator({
           fallbackPrice: r'$9.99',
         ),
       ],
-      activeSubscriptionQuery: (_) async => <ActiveSubscription>[
-        _activeSubscription(),
-      ],
+      activeSubscriptionQuery:
+          query ?? (_) async => <ActiveSubscription>[_activeSubscription()],
       actionObserver: actionObserver,
       googlePlayLicenseKeyAndroid: _licenseKey,
     ),
@@ -141,33 +143,13 @@ void main() {
     expect(state.shouldGrantAccess, isTrue);
   });
 
-  test('requires a Google Play license key on Android', () {
-    final FlutterInappPurchase iap = FlutterInappPurchase(
-      platform: FakePlatform(operatingSystem: Platform.android),
-    );
-
-    expect(() => SubscriptionStoreAdapter.forIap(iap), throwsArgumentError);
-  });
-
-  test('does not process pending or suspended purchases', () {
-    final PurchaseAndroid pending = _purchase(state: PurchaseState.Pending);
-    final PurchaseAndroid suspended = _purchase(suspended: true);
-
-    expect(AndroidSubscriptionHelper.isPending(pending), isTrue);
+  test('暂停订阅属于平台交易限制，普通购买不受此限制', () {
+    const adapter = GooglePlaySubscriptionAdapter();
     expect(
-      AndroidSubscriptionHelper.shouldProcessPurchaseUpdate(pending),
-      isFalse,
+      adapter.purchaseFailure(_purchase(suspended: true)),
+      SubscriptionFailureCode.subscriptionSuspended,
     );
-    expect(
-      AndroidSubscriptionHelper.shouldProcessPurchaseUpdate(suspended),
-      isFalse,
-    );
-    expect(
-      const GooglePlaySubscriptionAdapter()
-          .blockingAccessState(suspended)
-          ?.status,
-      SubscriptionAccessStatus.billingRetry,
-    );
+    expect(adapter.purchaseFailure(_purchase()), isNull);
   });
 
   test('verifies Google Play purchase signatures locally', () {
@@ -194,29 +176,31 @@ void main() {
     );
   });
 
-  test('requires an explicit offer when multiple offers are eligible', () {
-    final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
-      _offer(id: 'base', token: 'base-token'),
+  test('只接受当前商品包含的已选优惠令牌', () {
+    final iap = FlutterInappPurchase(
+      platform: FakePlatform(operatingSystem: Platform.android),
+    );
+    final product = _product([
+      _offer(id: 'monthly', token: 'base-token'),
       _offer(id: 'trial', token: 'trial-token'),
     ]);
-
-    expect(
-      () => AndroidSubscriptionHelper.resolvePurchaseOffer(product),
-      throwsA(
-        isA<AndroidSubscriptionOfferException>().having(
-          (error) => error.failureCode,
-          'failureCode',
-          SubscriptionFailureCode.offerRequired,
+    for (final offer in [null, _offer(id: 'trial', token: 'another-token')]) {
+      expect(
+        () => const GooglePlaySubscriptionAdapter().requestPurchase(
+          iap: iap,
+          product: product,
+          offer: offer,
+          options: const SubscriptionPurchaseOptions(),
         ),
-      ),
-    );
-    expect(
-      AndroidSubscriptionHelper.resolvePurchaseOffer(
-        product,
-        requestedOffer: product.subscriptionOffers.last,
-      ).offerTokenAndroid,
-      'trial-token',
-    );
+        throwsA(
+          isA<SubscriptionStoreException>().having(
+            (error) => error.failureCode,
+            'failureCode',
+            SubscriptionFailureCode.invalidOffer,
+          ),
+        ),
+      );
+    }
   });
 
   test(
@@ -250,8 +234,8 @@ void main() {
       await const GooglePlaySubscriptionAdapter().requestPurchase(
         iap: iap,
         product: product,
-        options: SubscriptionPurchaseOptions(
-          offer: product.subscriptionOffers.single,
+        offer: product.subscriptionOffers.single,
+        options: const SubscriptionPurchaseOptions(
           obfuscatedAccountIdAndroid: 'account-hash',
         ),
       );
@@ -341,7 +325,7 @@ void main() {
       );
       expect(
         coordinator.accessState.value.status,
-        SubscriptionAccessStatus.revoked,
+        SubscriptionAccessStatus.unavailable,
       );
       expect(acknowledgementCalls, 0);
     },
@@ -447,6 +431,12 @@ void main() {
             switch (call.method) {
               case 'initConnection':
                 return true;
+              case 'fetchProducts':
+                return [
+                  _product([
+                    _offer(id: 'monthly', token: 'base-token'),
+                  ]).toJson(),
+                ];
               case 'requestPurchase':
                 purchaseRequested.complete();
                 return null;
@@ -461,12 +451,7 @@ void main() {
       });
 
       final Future<SubscriptionActionResult> purchaseFuture = coordinator
-          .purchaseProduct(
-            _product(<SubscriptionOffer>[
-              _offer(id: 'base', token: 'base-token'),
-            ]),
-            source: 'test',
-          );
+          .purchasePlan(coordinator.config.plans.single, source: 'test');
       bool purchaseCompleted = false;
       purchaseFuture.whenComplete(() => purchaseCompleted = true);
       await purchaseRequested.future;
@@ -510,7 +495,9 @@ void main() {
       expect(result.cancelled, isTrue);
       expect(
         events.where(
-          (event) => event.phase == SubscriptionActionPhase.finished,
+          (event) =>
+              event.phase == SubscriptionActionPhase.finished &&
+              event.type == SubscriptionActionType.purchase,
         ),
         hasLength(1),
       );
@@ -523,9 +510,6 @@ void main() {
       final FlutterInappPurchase iap = FlutterInappPurchase(
         platform: FakePlatform(operatingSystem: Platform.android),
       );
-      final ProductSubscriptionAndroid product = _product(<SubscriptionOffer>[
-        _offer(id: 'base', token: 'base-token'),
-      ]);
       int initCalls = 0;
       int requestCalls = 0;
 
@@ -535,9 +519,17 @@ void main() {
               case 'initConnection':
                 initCalls++;
                 return true;
+              case 'fetchProducts':
+                return [
+                  _product([
+                    _offer(id: 'monthly', token: 'base-token'),
+                  ]).toJson(),
+                ];
               case 'requestPurchase':
                 requestCalls++;
-                throw PlatformException(code: 'E_SERVICE_DISCONNECTED');
+                throw PlatformException(
+                  code: ErrorCode.ServiceDisconnected.value,
+                );
               case 'endConnection':
                 return true;
             }
@@ -569,17 +561,17 @@ void main() {
       );
       addTearDown(coordinator.dispose);
 
-      final SubscriptionActionResult first = await coordinator.purchaseProduct(
-        product,
+      final SubscriptionActionResult first = await coordinator.purchasePlan(
+        coordinator.config.plans.single,
         source: 'first',
       );
-      final SubscriptionActionResult second = await coordinator.purchaseProduct(
-        product,
+      final SubscriptionActionResult second = await coordinator.purchasePlan(
+        coordinator.config.plans.single,
         source: 'second',
       );
 
-      expect(first.success, isFalse);
-      expect(second.success, isFalse);
+      expect(first.storeErrorCode, ErrorCode.ServiceDisconnected);
+      expect(second.storeErrorCode, ErrorCode.ServiceDisconnected);
       expect(requestCalls, 2);
       expect(initCalls, 2);
     },
@@ -619,4 +611,173 @@ void main() {
       SubscriptionAccessStatus.active,
     );
   });
+
+  test('Play 暂停状态与扣款重试区分，签名失败也不解释为商店撤销', () async {
+    var invalidSignature = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              return [];
+            case 'getAvailableItems':
+              return [
+                _purchase(
+                  suspended: true,
+                  signature: invalidSignature ? 'invalid' : _purchaseSignature,
+                ).toJson(),
+              ];
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null),
+    );
+    // 当前权益查询先返回有效，随后购买查询已返回暂停；不能继续按旧结果放行。
+    final coordinator = await _androidCoordinator();
+    addTearDown(coordinator.dispose);
+    await coordinator.init();
+    expect(
+      coordinator.accessState.value.status,
+      SubscriptionAccessStatus.suspended,
+    );
+    expect(coordinator.accessState.value.shouldGrantAccess, false);
+    invalidSignature = true;
+    final state = await coordinator.refreshAccessState();
+    expect(state.status, SubscriptionAccessStatus.unavailable);
+    expect(state.reason, SubscriptionAccessReason.localVerificationFailed);
+    expect(state.shouldGrantAccess, false);
+  });
+
+  test('其他商品的签名无效事件不覆盖已验证的 Google Play 权益', () async {
+    final synced = Completer<SubscriptionActionResult>();
+    final valid = _purchase();
+    final invalid = _purchase(
+      productId: 'another_subscription',
+      signature: 'invalid',
+    );
+    var acknowledgements = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              return [];
+            case 'getAvailableItems':
+              return [valid.toJson(), invalid.toJson()];
+            case 'acknowledgePurchaseAndroid':
+              acknowledgements++;
+              return true;
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null),
+    );
+    final coordinator = SubscriptionCoordinator(
+      iap: FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.android),
+      ),
+      config: SubscriptionCoordinatorConfig(
+        plans: const [
+          SubscriptionPlan(
+            googlePlay: GooglePlayPlan(
+              productId: 'subscribe_month_1',
+              basePlanId: 'monthly',
+            ),
+          ),
+          SubscriptionPlan(
+            googlePlay: GooglePlayPlan(
+              productId: 'another_subscription',
+              basePlanId: 'monthly',
+            ),
+          ),
+        ],
+        googlePlayLicenseKeyAndroid: _licenseKey,
+        activeSubscriptionQuery: (_) async => [_activeSubscription()],
+        actionObserver: (event) {
+          if (event.phase == SubscriptionActionPhase.finished &&
+              event.type == SubscriptionActionType.sync) {
+            synced.complete(event.result!);
+          }
+        },
+      ),
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.init();
+    expect(coordinator.accessState.value.shouldGrantAccess, true);
+    final states = <SubscriptionAccessState>[];
+    coordinator.accessState.addListener(
+      () => states.add(coordinator.accessState.value),
+    );
+    await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          _iapChannel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('purchase-updated', jsonEncode(invalid.toJson())),
+          ),
+          null,
+        );
+    final result = await synced.future;
+    expect(result.failureCode, SubscriptionFailureCode.localVerificationFailed);
+    expect(acknowledgements, 0);
+    expect(states, isNotEmpty);
+    expect(
+      states.every(
+        (state) =>
+            state.shouldGrantAccess && state.productId == 'subscribe_month_1',
+      ),
+      true,
+    );
+  });
+
+  for (final queryThrows in [false, true]) {
+    test('Android 权益${queryThrows ? '查询异常' : '返回空结果'}不进行固定轮询', () async {
+      var queries = 0;
+      final coordinator = await _androidCoordinator(
+        query: (_) async {
+          queries++;
+          if (queryThrows) throw StateError('查询不可用');
+          return [];
+        },
+      );
+      addTearDown(coordinator.dispose);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, (call) async {
+            switch (call.method) {
+              case 'initConnection':
+              case 'endConnection':
+                return true;
+              case 'fetchProducts':
+                return [];
+              case 'getAvailableItems':
+                return [_purchase().toJson()];
+              case 'acknowledgePurchaseAndroid':
+                fail('未确认有效权益，不应确认该交易');
+            }
+            return null;
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(_iapChannel, null),
+      );
+      await coordinator.init();
+      queries = 0;
+      final result = await coordinator.restore();
+      expect(
+        result.failureCode,
+        queryThrows
+            ? SubscriptionFailureCode.processingException
+            : SubscriptionFailureCode.subscriptionInactive,
+      );
+      // 单笔验证一次，恢复结束后的全局刷新一次。
+      expect(queries, 2);
+    });
+  }
 }

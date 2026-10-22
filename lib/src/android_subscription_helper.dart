@@ -12,27 +12,10 @@ import 'package:pointycastle/digests/sha1.dart';
 import 'package:pointycastle/signers/rsa_signer.dart';
 
 import 'subscription_access_state.dart';
-import 'subscription_failure.dart';
 
-/// 提供 Google Play 订阅字段归一化、签名验证和 offer 选择规则。
+/// 提供 Google Play 订阅签名验证和权益映射。
 class AndroidSubscriptionHelper {
   const AndroidSubscriptionHelper._();
-
-  /// 从购买对象中解析稳定的商品标识。
-  static String normalizedProductId(PurchaseAndroid item) =>
-      item.productId.trim();
-
-  /// 判断购买是否仍在等待用户或商店处理。
-  static bool isPending(PurchaseAndroid item) =>
-      item.purchaseState == PurchaseState.Pending;
-
-  /// 判断购买更新是否满足后续验证和确认条件。
-  static bool shouldProcessPurchaseUpdate(PurchaseAndroid item) {
-    return item.purchaseState == PurchaseState.Purchased &&
-        item.isSuspendedAndroid != true &&
-        normalizedProductId(item).isNotEmpty &&
-        (item.purchaseToken ?? '').isNotEmpty;
-  }
 
   /// 使用 Play Console 公钥验证购买签名及关键字段一致性。
   static bool verifyPurchaseSignature({
@@ -80,7 +63,7 @@ class AndroidSubscriptionHelper {
       if (products is List) {
         signedProductIds.addAll(products.map((product) => product.toString()));
       }
-      if (!signedProductIds.contains(normalizedProductId(purchase))) {
+      if (!signedProductIds.contains(purchase.productId)) {
         return false;
       }
 
@@ -174,67 +157,4 @@ class AndroidSubscriptionHelper {
       now: now,
     );
   }
-
-  /// 返回包含有效购买令牌的订阅 offer。
-  static List<SubscriptionOffer> purchasableOffers(
-    ProductSubscriptionAndroid product,
-  ) {
-    return product.subscriptionOffers
-        .where((offer) => (offer.offerTokenAndroid ?? '').isNotEmpty)
-        .toList(growable: false);
-  }
-
-  /// 解析本次购买使用的 base plan 或 offer。
-  static SubscriptionOffer resolvePurchaseOffer(
-    ProductSubscriptionAndroid product, {
-    SubscriptionOffer? requestedOffer,
-  }) {
-    final List<SubscriptionOffer> offers = purchasableOffers(product);
-    if (requestedOffer != null) {
-      final String token = requestedOffer.offerTokenAndroid ?? '';
-      for (final SubscriptionOffer offer in offers) {
-        if (token.isNotEmpty && offer.offerTokenAndroid == token) {
-          return offer;
-        }
-      }
-      throw const AndroidSubscriptionOfferException(
-        failureCode: SubscriptionFailureCode.invalidOffer,
-        message:
-            'The selected Google Play offer does not belong to the product.',
-      );
-    }
-
-    if (offers.length == 1) {
-      return offers.single;
-    }
-    if (offers.isEmpty) {
-      throw const AndroidSubscriptionOfferException(
-        failureCode: SubscriptionFailureCode.offerUnavailable,
-        message: 'No eligible Google Play subscription offer is available.',
-      );
-    }
-    throw const AndroidSubscriptionOfferException(
-      failureCode: SubscriptionFailureCode.offerRequired,
-      message: 'Select a Google Play base plan or offer before purchasing.',
-    );
-  }
-}
-
-/// 表示 Google Play 订阅 offer 无法用于当前购买。
-class AndroidSubscriptionOfferException implements Exception {
-  /// 创建包含稳定错误码和说明的 offer 异常。
-  const AndroidSubscriptionOfferException({
-    required this.failureCode,
-    required this.message,
-  });
-
-  /// 可供调用方分类处理的错误码。
-  final SubscriptionFailureCode failureCode;
-  String get code => failureCode.code;
-
-  /// 面向日志或调用方的错误说明。
-  final String message;
-
-  @override
-  String toString() => message;
 }

@@ -29,55 +29,24 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
   }) async => const {};
 
   @override
-  bool supportsProduct(ProductSubscription product) =>
-      product is ProductSubscriptionAndroid;
-
-  @override
   bool supportsPurchase(Purchase purchase) =>
       purchase is PurchaseAndroid && purchase.storeId == StoreIds.play;
 
   @override
-  List<SubscriptionOffer> offersFor(ProductSubscription product) {
-    if (product is! ProductSubscriptionAndroid) {
-      return const <SubscriptionOffer>[];
-    }
-    return AndroidSubscriptionHelper.purchasableOffers(product);
-  }
-
-  @override
-  String normalizedProductId(Purchase purchase) =>
-      AndroidSubscriptionHelper.normalizedProductId(
-        purchase as PurchaseAndroid,
-      );
-
-  @override
-  bool isPending(Purchase purchase) =>
-      purchase is PurchaseAndroid &&
-      AndroidSubscriptionHelper.isPending(purchase);
-
-  @override
-  bool shouldProcessPurchaseUpdate(Purchase purchase) =>
-      purchase is PurchaseAndroid &&
-      AndroidSubscriptionHelper.shouldProcessPurchaseUpdate(purchase);
-
-  @override
-  SubscriptionAccessState? blockingAccessState(Purchase purchase) {
-    if (purchase is! PurchaseAndroid || purchase.isSuspendedAndroid != true) {
-      return null;
-    }
-    return SubscriptionAccessState(
-      status: SubscriptionAccessStatus.billingRetry,
-      evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
-      productId: normalizedProductId(purchase),
-      transactionId: purchase.transactionId ?? purchase.id,
-      note: 'Google Play subscription is suspended',
-    );
+  SubscriptionFailureCode? purchaseFailure(Purchase purchase) {
+    final item = purchase as PurchaseAndroid;
+    if (item.isSuspendedAndroid == true)
+      return SubscriptionFailureCode.subscriptionSuspended;
+    if ((item.purchaseToken ?? '').isEmpty)
+      return SubscriptionFailureCode.missingPurchaseToken;
+    return null;
   }
 
   @override
   Future<void> requestPurchase({
     required FlutterInappPurchase iap,
     required ProductSubscription product,
+    required SubscriptionOffer? offer,
     required SubscriptionPurchaseOptions options,
   }) {
     if (product is! ProductSubscriptionAndroid) {
@@ -86,16 +55,16 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         message: 'The product is not a Google Play subscription.',
       );
     }
-    late final SubscriptionOffer offer;
-    try {
-      offer = AndroidSubscriptionHelper.resolvePurchaseOffer(
-        product,
-        requestedOffer: options.offer,
-      );
-    } on AndroidSubscriptionOfferException catch (error) {
-      throw SubscriptionStoreException(
-        failureCode: error.failureCode,
-        message: error.message,
+    final token = offer?.offerTokenAndroid;
+    if (token == null ||
+        token.isEmpty ||
+        !product.subscriptionOffers.any(
+          (item) => item.offerTokenAndroid == token,
+        )) {
+      throw const SubscriptionStoreException(
+        failureCode: SubscriptionFailureCode.invalidOffer,
+        message:
+            'The selected Google Play offer does not belong to the product.',
       );
     }
     return iap.requestPurchase(
@@ -104,10 +73,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         google: RequestSubscriptionAndroidProps(
           skus: <String>[product.id],
           subscriptionOffers: <AndroidSubscriptionOfferInput>[
-            AndroidSubscriptionOfferInput(
-              sku: product.id,
-              offerToken: offer.offerTokenAndroid!,
-            ),
+            AndroidSubscriptionOfferInput(sku: product.id, offerToken: token),
           ],
           obfuscatedAccountId: options.obfuscatedAccountIdAndroid,
           obfuscatedProfileId: options.obfuscatedProfileIdAndroid,
@@ -171,7 +137,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
   }
 
   @override
-  Future<SubscriptionAccessState> resolveVerifiedAccessState({
+  Future<SubscriptionAccessResolution> resolveVerifiedAccessState({
     required FlutterInappPurchase iap,
     required List<ActiveSubscription> subscriptions,
     required List<ProductSubscription> products,
@@ -190,9 +156,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     final List<PurchaseAndroid> purchases =
         (await iap.getAvailablePurchases(includeSuspendedAndroid: true))
             .whereType<PurchaseAndroid>()
-            .where(
-              (purchase) => productIds.contains(normalizedProductId(purchase)),
-            )
+            .where((purchase) => productIds.contains(purchase.productId))
             .toList(growable: false);
     final List<PurchaseAndroid> verifiedPurchases = purchases
         .where(
@@ -203,11 +167,8 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         )
         .toList(growable: false);
 
-    // 当前插件两种令牌字段均有定义，只允许按购买令牌关联已验证购买。
-    final Set<String> verifiedTokens = verifiedPurchases
-        .map((purchase) => purchase.purchaseToken ?? '')
-        .where((token) => token.isNotEmpty)
-        .toSet();
+    // 当前插件两种令牌字段均有定义，必须同时匹配令牌和商品。
+    // 两次查询间状态可能变化，购买记录已暂停或仍待付款时不能放行。
     final List<ActiveSubscription> verifiedSubscriptions = subscriptions
         .where((subscription) {
           final String token =
@@ -215,27 +176,40 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
               subscription.purchaseToken ??
               '';
           return token.isNotEmpty &&
-              verifiedTokens.contains(token) &&
               verifiedPurchases.any(
                 (purchase) =>
                     purchase.purchaseToken == token &&
-                    normalizedProductId(purchase) == subscription.productId,
+                    purchase.productId == subscription.productId &&
+                    purchase.purchaseState == PurchaseState.Purchased &&
+                    purchase.isSuspendedAndroid != true,
               );
         })
         .toList(growable: false);
 
     if (verifiedSubscriptions.any((subscription) => subscription.isActive)) {
-      return AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-        verifiedSubscriptions,
-        fallbackProductId: fallbackProductId,
-        now: now,
+      return (
+        state:
+            AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
+              verifiedSubscriptions,
+              fallbackProductId: fallbackProductId,
+              now: now,
+            ),
+        queryFailedProductIds: const <String>{},
       );
     }
 
-    for (final PurchaseAndroid purchase in verifiedPurchases) {
-      final SubscriptionAccessState? blocked = blockingAccessState(purchase);
-      if (blocked != null) {
-        return blocked;
+    for (final purchase in verifiedPurchases) {
+      if (purchase.isSuspendedAndroid == true) {
+        return (
+          state: SubscriptionAccessState(
+            status: SubscriptionAccessStatus.suspended,
+            evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+            productId: purchase.productId,
+            transactionId: purchase.transactionId ?? purchase.id,
+            note: 'Google Play subscription is suspended',
+          ),
+          queryFailedProductIds: const <String>{},
+        );
       }
     }
 
@@ -245,18 +219,26 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
           !verifiedPurchases.contains(purchase),
     );
     if (hasUnverifiedOwnedPurchase) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.revoked,
-        evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-        productId: fallbackProductId,
-        note: 'Google Play purchase signature verification failed',
+      return (
+        state: SubscriptionAccessState(
+          status: SubscriptionAccessStatus.unavailable,
+          evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+          productId: fallbackProductId,
+          note: 'Google Play purchase signature verification failed',
+          reason: SubscriptionAccessReason.localVerificationFailed,
+        ),
+        queryFailedProductIds: const <String>{},
       );
     }
 
-    return AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-      const <ActiveSubscription>[],
-      fallbackProductId: fallbackProductId,
-      now: now,
+    return (
+      state:
+          AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
+            const <ActiveSubscription>[],
+            fallbackProductId: fallbackProductId,
+            now: now,
+          ),
+      queryFailedProductIds: const <String>{},
     );
   }
 
@@ -265,7 +247,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     final PurchaseAndroid item = purchase as PurchaseAndroid;
     final String purchaseToken = item.purchaseToken ?? '';
     return SubscriptionTransactionPayload(
-      productId: normalizedProductId(item),
+      productId: item.productId,
       store: item.store,
       originalTransactionId: purchaseToken,
       currentTransactionId: item.transactionId ?? item.id,

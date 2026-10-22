@@ -17,30 +17,9 @@ enum StoreKitSubscriptionState {
       .firstWhere((state) => state.name == value.trim(), orElse: () => unknown);
 }
 
-/// 提供 App Store 订阅字段归一化、权益选择和试用资格判断。
+/// 提供 App Store 订阅状态映射、权益选择和试用资格判断。
 class IosSubscriptionHelper {
   const IosSubscriptionHelper._();
-
-  /// 从 StoreKit 购买对象中解析稳定的商品标识。
-  static String normalizedProductId(PurchaseIOS item) => item.productId.trim();
-
-  /// 判断购买更新是否满足后续验证和完成交易条件。
-  static bool shouldProcessPurchaseUpdate(PurchaseIOS item) {
-    return item.purchaseState == PurchaseState.Purchased &&
-        normalizedProductId(item).isNotEmpty;
-  }
-
-  /// 购买后当前权益查询尚未刷新时，将已通过本地验证的购买转换为临时权益。
-  static ActiveSubscription activeSubscriptionFromPurchase(PurchaseIOS item) {
-    return ActiveSubscription(
-      expirationDateIOS: item.expirationDateIOS,
-      isActive: true,
-      productId: normalizedProductId(item),
-      renewalInfoIOS: item.renewalInfoIOS,
-      transactionDate: item.transactionDate,
-      transactionId: item.transactionId,
-    );
-  }
 
   /// 从多个权益状态中选择最应授予用户的状态。
   static SubscriptionAccessState selectMostRelevantAccessState(
@@ -274,8 +253,10 @@ class IosSubscriptionHelper {
         return 3;
       case SubscriptionAccessStatus.billingRetry:
         return 4;
-      case SubscriptionAccessStatus.expired:
+      case SubscriptionAccessStatus.suspended:
         return 5;
+      case SubscriptionAccessStatus.expired:
+        return 6;
     }
   }
 

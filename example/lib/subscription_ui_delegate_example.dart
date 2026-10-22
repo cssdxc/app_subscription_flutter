@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 
 import 'subscription_service_example.dart';
 
-/// 界面直接订阅库的状态；文案、提示、导航和埋点均由宿主负责。
+/// 宿主界面接入示例，不属于插件 API；组件、样式和交互均由宿主负责。
 class ExampleSubscriptionPanel extends StatelessWidget {
   const ExampleSubscriptionPanel({
     super.key,

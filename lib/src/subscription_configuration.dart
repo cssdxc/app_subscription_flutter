@@ -8,7 +8,7 @@ import 'subscription_transaction.dart';
 /// 接收订阅模块诊断日志。
 typedef SubscriptionLogger = void Function(String message);
 
-/// 接收通过验证且已获得权益的交易载荷。
+/// 独立记录通过验证且已完成商店交易的载荷，不阻塞购买或恢复结果。
 typedef SubscriptionTransactionReporter =
     Future<void> Function(SubscriptionTransactionPayload payload);
 
@@ -46,7 +46,7 @@ class SubscriptionCoordinatorConfig {
   /// 可选的诊断日志回调。
   final SubscriptionLogger? logger;
 
-  /// 可选的已验证交易回传回调。
+  /// 可选的交易记录回调；异常仅记日志，不参与授权或重试。
   final SubscriptionTransactionReporter? transactionReporter;
 
   /// 可选的订阅操作生命周期观察器。

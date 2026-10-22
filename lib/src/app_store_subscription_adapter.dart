@@ -25,53 +25,23 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
   );
 
   @override
-  bool supportsProduct(ProductSubscription product) =>
-      product is ProductSubscriptionIOS;
-
-  @override
   bool supportsPurchase(Purchase purchase) =>
       purchase is PurchaseIOS && purchase.storeId == StoreIds.apple;
 
   @override
-  List<SubscriptionOffer> offersFor(ProductSubscription product) {
-    if (product is! ProductSubscriptionIOS) {
-      return const <SubscriptionOffer>[];
-    }
-    return product.subscriptionOffers ?? const <SubscriptionOffer>[];
-  }
-
-  @override
-  String normalizedProductId(Purchase purchase) =>
-      IosSubscriptionHelper.normalizedProductId(purchase as PurchaseIOS);
-
-  @override
-  bool isPending(Purchase purchase) =>
-      purchase.purchaseState == PurchaseState.Pending;
-
-  @override
-  bool shouldProcessPurchaseUpdate(Purchase purchase) =>
-      purchase is PurchaseIOS &&
-      IosSubscriptionHelper.shouldProcessPurchaseUpdate(purchase);
-
-  @override
-  SubscriptionAccessState? blockingAccessState(Purchase purchase) => null;
+  SubscriptionFailureCode? purchaseFailure(Purchase purchase) => null;
 
   @override
   Future<void> requestPurchase({
     required FlutterInappPurchase iap,
     required ProductSubscription product,
+    required SubscriptionOffer? offer,
     required SubscriptionPurchaseOptions options,
   }) {
     if (product is! ProductSubscriptionIOS) {
       throw const SubscriptionStoreException(
         failureCode: SubscriptionFailureCode.invalidProductPlatform,
         message: 'The product is not an App Store subscription.',
-      );
-    }
-    if (options.offer != null) {
-      throw const SubscriptionStoreException(
-        failureCode: SubscriptionFailureCode.unsupportedOffer,
-        message: 'Signed App Store promotional offers are not configured.',
       );
     }
     return iap.requestPurchase(
@@ -105,7 +75,7 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
     required Purchase purchase,
   }) async {
     final PurchaseIOS item = purchase as PurchaseIOS;
-    final String productId = normalizedProductId(item);
+    final String productId = item.productId;
     if (productId.isEmpty || !await iap.isTransactionVerifiedIOS(productId)) {
       throw const SubscriptionStoreException(
         failureCode: SubscriptionFailureCode.localVerificationFailed,
@@ -115,7 +85,7 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
   }
 
   @override
-  Future<SubscriptionAccessState> resolveVerifiedAccessState({
+  Future<SubscriptionAccessResolution> resolveVerifiedAccessState({
     required FlutterInappPurchase iap,
     required List<ActiveSubscription> subscriptions,
     required List<ProductSubscription> products,
@@ -128,11 +98,14 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
       productIds: productIds,
     );
     if (groups.isEmpty) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.unavailable,
-        evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-        productId: fallbackProductId,
-        note: 'no App Store subscription product configured',
+      return (
+        state: SubscriptionAccessState(
+          status: SubscriptionAccessStatus.unavailable,
+          evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+          productId: fallbackProductId,
+          note: 'no App Store subscription product configured',
+        ),
+        queryFailedProductIds: const <String>{},
       );
     }
 
@@ -140,6 +113,7 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
         subscriptionStatusQuery ?? iap.subscriptionStatusIOS;
     final List<SubscriptionAccessState> groupStates =
         <SubscriptionAccessState>[];
+    final queryFailedProductIds = <String>{};
 
     for (final _AppStoreSubscriptionGroup group in groups) {
       try {
@@ -161,18 +135,31 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
           ),
         );
       } catch (error) {
+        queryFailedProductIds.addAll(group.productIds);
         groupStates.add(
           SubscriptionAccessState(
             status: SubscriptionAccessStatus.unavailable,
             evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
             productId: group.representativeProductId,
             note: 'StoreKit subscription status unavailable: $error',
+            reason: SubscriptionAccessReason.storeQueryFailed,
           ),
         );
       }
     }
 
-    return IosSubscriptionHelper.selectMostRelevantAccessState(groupStates);
+    final state = IosSubscriptionHelper.selectMostRelevantAccessState(
+      groupStates,
+    );
+    return (
+      state: !state.shouldGrantAccess && queryFailedProductIds.isNotEmpty
+          ? groupStates.firstWhere(
+              (state) =>
+                  state.reason == SubscriptionAccessReason.storeQueryFailed,
+            )
+          : state,
+      queryFailedProductIds: Set.unmodifiable(queryFailedProductIds),
+    );
   }
 
   List<_AppStoreSubscriptionGroup> _resolveSubscriptionGroups({
@@ -218,7 +205,7 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
   SubscriptionTransactionPayload transactionPayload(Purchase purchase) {
     final PurchaseIOS item = purchase as PurchaseIOS;
     return SubscriptionTransactionPayload(
-      productId: normalizedProductId(item),
+      productId: item.productId,
       store: item.store,
       originalTransactionId: item.originalTransactionIdentifierIOS ?? '',
       currentTransactionId: item.transactionId,

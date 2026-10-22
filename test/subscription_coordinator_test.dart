@@ -127,7 +127,7 @@ void main() {
         },
       );
 
-      await coordinator.loadStoredStatus();
+      await coordinator.init();
       final SubscriptionAccessState resolvedState = await coordinator
           .refreshAccessState(source: 'test');
 
@@ -181,7 +181,7 @@ void main() {
       storeKitState: 'expired',
     );
 
-    await coordinator.loadStoredStatus();
+    await coordinator.init();
     final SubscriptionAccessState resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
@@ -210,7 +210,7 @@ void main() {
       storeKitState: 'inGracePeriod',
     );
 
-    await coordinator.loadStoredStatus();
+    await coordinator.init();
     final SubscriptionAccessState resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
@@ -241,7 +241,7 @@ void main() {
       query: (productIds) async => throw Exception('offline'),
     );
 
-    await coordinator.loadStoredStatus();
+    await coordinator.init();
     expect(
       coordinator.accessState.value.status,
       SubscriptionAccessStatus.unavailable,
@@ -461,7 +461,7 @@ void main() {
         },
       );
 
-      await coordinator.loadStoredStatus();
+      await coordinator.init();
 
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {

@@ -16,7 +16,7 @@ void main() {
       storageKey: 'cache',
     );
     final now = DateTime.fromMillisecondsSinceEpoch(1700000000000);
-    expect(cache.read(now: now), isNull);
+    expect(await cache.read(now: now), isNull);
     for (final age in [0, const Duration(hours: 6).inMilliseconds]) {
       await cache.write(
         SubscriptionAccessState(
@@ -24,7 +24,7 @@ void main() {
           evaluatedAtMs: now.millisecondsSinceEpoch - age,
         ),
       );
-      expect(cache.read(now: now)?.shouldGrantAccess, isTrue);
+      expect((await cache.read(now: now))?.shouldGrantAccess, isTrue);
     }
     for (final age in [-1, const Duration(hours: 6).inMilliseconds + 1]) {
       await cache.write(
@@ -33,7 +33,7 @@ void main() {
           evaluatedAtMs: now.millisecondsSinceEpoch - age,
         ),
       );
-      expect(cache.read(now: now), isNull);
+      expect(await cache.read(now: now), isNull);
     }
     for (final value in [
       '{bad',
@@ -41,7 +41,7 @@ void main() {
       jsonEncode({'evaluatedAtMs': 'wrong'}),
     ]) {
       await prefs.setString('cache', value);
-      expect(cache.read(now: now), isNull);
+      expect(await cache.read(now: now), isNull);
     }
   });
 }

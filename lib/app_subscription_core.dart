@@ -11,8 +11,6 @@ export 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart'
         SubscriptionPeriodUnit;
 
 export 'src/subscription_access_state.dart';
-export 'src/android_subscription_helper.dart';
-export 'src/ios_subscription_helper.dart';
 export 'src/subscription_action_result.dart';
 export 'src/subscription_catalog.dart';
 export 'src/subscription_coordinator.dart';
@@ -25,5 +23,3 @@ export 'src/subscription_operation_state.dart'
     show SubscriptionOperation, SubscriptionOperationState;
 
 export 'src/subscription_configuration.dart';
-export 'src/app_store_subscription_adapter.dart';
-export 'src/google_play_subscription_adapter.dart';

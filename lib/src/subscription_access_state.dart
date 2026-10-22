@@ -9,6 +9,9 @@ enum SubscriptionAccessStatus {
   /// 商店正在重试扣款，当前不授予权益。
   billingRetry,
 
+  /// Google Play 返回的暂停状态，不能据此区分账号保留或用户主动暂停。
+  suspended,
+
   /// 订阅交易已被商店撤销。
   revoked,
 
@@ -20,7 +23,11 @@ enum SubscriptionAccessStatus {
 }
 
 /// 与日志说明分开的可判定状态原因。
-enum SubscriptionAccessReason { noCurrentSubscription }
+enum SubscriptionAccessReason {
+  noCurrentSubscription,
+  storeQueryFailed,
+  localVerificationFailed,
+}
 
 /// 订阅模块对外提供的统一权益快照。
 class SubscriptionAccessState {
@@ -85,10 +92,9 @@ class SubscriptionAccessState {
       productId: json['productId']?.toString() ?? '',
       transactionId: json['transactionId']?.toString() ?? '',
       note: json['note']?.toString(),
-      reason:
-          json['reason'] == SubscriptionAccessReason.noCurrentSubscription.name
-          ? SubscriptionAccessReason.noCurrentSubscription
-          : null,
+      reason: SubscriptionAccessReason.values
+          .where((value) => value.name == json['reason'])
+          .firstOrNull,
     );
   }
 

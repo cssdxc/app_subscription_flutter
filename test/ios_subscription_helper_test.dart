@@ -1,4 +1,6 @@
 import 'package:app_subscription_core/app_subscription_core.dart';
+import 'package:app_subscription_core/src/ios_subscription_helper.dart';
+import 'package:app_subscription_core/src/app_store_subscription_adapter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -80,16 +82,16 @@ void main() {
     for (final MapEntry<String, SubscriptionAccessStatus> entry
         in expectedStatuses.entries) {
       nativeState = entry.key;
-      final SubscriptionAccessState state = await adapter
-          .resolveVerifiedAccessState(
-            iap: iap,
-            subscriptions: <ActiveSubscription>[_entitlement()],
-            products: const <ProductSubscription>[],
-            productIds: const <String>['subscribe_month_1'],
-            fallbackProductId: 'subscribe_month_1',
-            now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-          );
+      final resolution = await adapter.resolveVerifiedAccessState(
+        iap: iap,
+        subscriptions: <ActiveSubscription>[_entitlement()],
+        products: const <ProductSubscription>[],
+        productIds: const <String>['subscribe_month_1'],
+        fallbackProductId: 'subscribe_month_1',
+        now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+      );
 
+      final state = resolution.state;
       expect(state.status, entry.value, reason: nativeState);
       if (nativeState == 'inGracePeriod') {
         expect(state.shouldGrantAccess, isTrue);
@@ -249,25 +251,24 @@ void main() {
       platform: FakePlatform(operatingSystem: Platform.iOS),
     );
 
-    final SubscriptionAccessState state = await adapter
-        .resolveVerifiedAccessState(
-          iap: iap,
-          subscriptions: <ActiveSubscription>[
-            _entitlement(productId: 'basic_month'),
-          ],
-          products: <ProductSubscription>[
-            _product(id: 'basic_month', groupId: 'basic'),
-            _product(id: 'basic_year', groupId: 'basic'),
-            _product(id: 'pro_month', groupId: 'pro'),
-          ],
-          productIds: const <String>['basic_month', 'basic_year', 'pro_month'],
-          fallbackProductId: 'basic_month,basic_year,pro_month',
-          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-        );
+    final resolution = await adapter.resolveVerifiedAccessState(
+      iap: iap,
+      subscriptions: <ActiveSubscription>[
+        _entitlement(productId: 'basic_month'),
+      ],
+      products: <ProductSubscription>[
+        _product(id: 'basic_month', groupId: 'basic'),
+        _product(id: 'basic_year', groupId: 'basic'),
+        _product(id: 'pro_month', groupId: 'pro'),
+      ],
+      productIds: const <String>['basic_month', 'basic_year', 'pro_month'],
+      fallbackProductId: 'basic_month,basic_year,pro_month',
+      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+    );
 
     expect(queriedProductIds, <String>['basic_month', 'pro_month']);
-    expect(state.status, SubscriptionAccessStatus.active);
-    expect(state.productId, 'basic_month');
+    expect(resolution.state.status, SubscriptionAccessStatus.active);
+    expect(resolution.state.productId, 'basic_month');
   });
 
   test('任一订阅组查询失败且没有有效权益时返回不可用', () async {
@@ -285,20 +286,20 @@ void main() {
       platform: FakePlatform(operatingSystem: Platform.iOS),
     );
 
-    final SubscriptionAccessState state = await adapter
-        .resolveVerifiedAccessState(
-          iap: iap,
-          subscriptions: const <ActiveSubscription>[],
-          products: <ProductSubscription>[
-            _product(id: 'basic_month', groupId: 'basic'),
-            _product(id: 'pro_month', groupId: 'pro'),
-          ],
-          productIds: const <String>['basic_month', 'pro_month'],
-          fallbackProductId: 'basic_month,pro_month',
-          now: DateTime.fromMillisecondsSinceEpoch(nowMs),
-        );
+    final resolution = await adapter.resolveVerifiedAccessState(
+      iap: iap,
+      subscriptions: const <ActiveSubscription>[],
+      products: <ProductSubscription>[
+        _product(id: 'basic_month', groupId: 'basic'),
+        _product(id: 'pro_month', groupId: 'pro'),
+      ],
+      productIds: const <String>['basic_month', 'pro_month'],
+      fallbackProductId: 'basic_month,pro_month',
+      now: DateTime.fromMillisecondsSinceEpoch(nowMs),
+    );
 
-    expect(state.status, SubscriptionAccessStatus.unavailable);
-    expect(state.shouldGrantAccess, isFalse);
+    expect(resolution.state.status, SubscriptionAccessStatus.unavailable);
+    expect(resolution.state.shouldGrantAccess, isFalse);
+    expect(resolution.queryFailedProductIds, {'pro_month'});
   });
 }

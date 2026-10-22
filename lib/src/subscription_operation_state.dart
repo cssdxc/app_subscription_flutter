@@ -33,11 +33,11 @@ class SubscriptionOperationState {
       isRestoring ||
       running.contains(SubscriptionOperation.processingPurchase);
 
-  /// 用户操作才展示阻断式 loading，静默恢复和后台工作不自动遮挡界面。
+  /// 非静默购买或恢复的状态提示；是否展示 loading 及展示方式由宿主决定。
   bool get showBlockingLoading => !silent && (isPurchasing || isRestoring);
 }
 
-/// 内部计数器，保证并行工作与异常退出不会提前关闭其他工作的 loading。
+/// 内部计数器，保证并行工作与异常退出不会提前清除其他工作的状态。
 class SubscriptionOperationTracker
     extends ValueNotifier<SubscriptionOperationState> {
   SubscriptionOperationTracker() : super(const SubscriptionOperationState());
