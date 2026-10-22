@@ -108,7 +108,7 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `2.0.0`，包含不兼容的公共接口精简，不提供旧接口兼容层。
+当前 Git 发布版本为 `1.0.1`，包含不兼容的公共接口精简，不提供旧接口兼容层。
 接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
 
 ```yaml
@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 2.0.0
+      ref: 1.0.1
 ```
 
 ### 1. 配置逻辑套餐
