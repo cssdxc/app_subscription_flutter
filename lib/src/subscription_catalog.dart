@@ -1,5 +1,6 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'app_store_trial.dart';
 import 'subscription_failure.dart';
 import 'subscription_plan.dart';
 import 'subscription_price.dart';
@@ -28,16 +29,7 @@ class SubscriptionCatalog {
       );
     }
     if (store == IapStore.Apple && product is ProductSubscriptionIOS) {
-      final trialOffers = (product.subscriptionOffers ?? <SubscriptionOffer>[])
-          .where(
-            (offer) =>
-                offer.type == DiscountOfferType.Introductory &&
-                offer.paymentMode == PaymentMode.FreeTrial,
-          )
-          .toList();
-      final hasTrial =
-          trialOffers.isNotEmpty ||
-          product.introductoryPricePaymentModeIOS == PaymentModeIOS.FreeTrial;
+      final hasTrial = product.hasIntroductoryFreeTrial;
       final amount = product.price;
       return SubscriptionPlanDetails(
         plan: plan,
@@ -63,7 +55,10 @@ class SubscriptionCatalog {
             ? appStoreTrialEligibility
             : SubscriptionTrialEligibility.ineligible,
         trialPeriod: hasTrial
-            ? _appStoreTrialPeriod(product, trialOffers)
+            ? _appStoreTrialPeriod(
+                product,
+                product.introductoryFreeTrialOffers.toList(),
+              )
             : null,
       );
     }

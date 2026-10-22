@@ -16,6 +16,8 @@ const _applePlan = SubscriptionPlan(appStoreProductId: 'monthly');
 ProductSubscriptionIOS _appleProduct({
   String id = 'monthly',
   String group = 'group',
+  PaymentModeIOS paymentMode = PaymentModeIOS.FreeTrial,
+  List<SubscriptionOffer>? offers,
 }) => ProductSubscriptionIOS(
   id: id,
   currency: 'USD',
@@ -24,7 +26,8 @@ ProductSubscriptionIOS _appleProduct({
   displayNameIOS: '',
   displayPrice: r'$12.00',
   price: 12,
-  introductoryPricePaymentModeIOS: PaymentModeIOS.FreeTrial,
+  introductoryPricePaymentModeIOS: paymentMode,
+  subscriptionOffers: offers,
   subscriptionGroupIdIOS: group,
   isFamilyShareableIOS: false,
   jsonRepresentationIOS: '{}',
@@ -613,6 +616,91 @@ void main() {
     expect(result.failureCode, isNull);
     expect(purchaseRequests, 0);
     expect(coordinator.activity.value.isLoading, isFalse);
+  });
+
+  test('Apple 商品解析与资格查询一致识别首次免费试用，排除普通折扣和促销', () async {
+    final cases = [
+      (product: _appleProduct(id: 'field', group: 'field'), eligible: true),
+      (
+        product: _appleProduct(
+          id: 'intro',
+          group: 'intro',
+          paymentMode: PaymentModeIOS.Empty,
+          offers: [
+            const SubscriptionOffer(
+              id: 'intro',
+              displayPrice: r'$0.00',
+              price: 0,
+              type: DiscountOfferType.Introductory,
+              paymentMode: PaymentMode.FreeTrial,
+            ),
+          ],
+        ),
+        eligible: true,
+      ),
+      (
+        product: _appleProduct(
+          id: 'discount',
+          group: 'discount',
+          paymentMode: PaymentModeIOS.PayAsYouGo,
+          offers: [
+            const SubscriptionOffer(
+              id: 'discount',
+              displayPrice: r'$1.00',
+              price: 1,
+              type: DiscountOfferType.Introductory,
+              paymentMode: PaymentMode.PayAsYouGo,
+            ),
+          ],
+        ),
+        eligible: false,
+      ),
+      (
+        product: _appleProduct(
+          id: 'promo',
+          group: 'promo',
+          paymentMode: PaymentModeIOS.Empty,
+          offers: [
+            const SubscriptionOffer(
+              id: 'promo',
+              displayPrice: r'$0.00',
+              price: 0,
+              type: DiscountOfferType.Promotional,
+              paymentMode: PaymentMode.FreeTrial,
+            ),
+          ],
+        ),
+        eligible: false,
+      ),
+    ];
+    final queriedGroups = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          expect(call.method, 'isEligibleForIntroOfferIOS');
+          queriedGroups.add((call.arguments as Map)['productId'] as String);
+          return true;
+        });
+    final eligibility = await IosSubscriptionHelper.queryTrialEligibility(
+      iap: FlutterInappPurchase(
+        platform: FakePlatform(operatingSystem: Platform.iOS),
+      ),
+      products: cases.map((item) => item.product).toList(),
+    );
+    expect(queriedGroups, ['field', 'intro']);
+    for (final item in cases) {
+      final expected = item.eligible
+          ? SubscriptionTrialEligibility.eligible
+          : SubscriptionTrialEligibility.ineligible;
+      expect(eligibility[item.product.id], expected);
+      final details = const SubscriptionCatalog().resolvePlan(
+        SubscriptionPlan(appStoreProductId: item.product.id),
+        store: IapStore.Apple,
+        products: [item.product],
+        appStoreTrialEligibility: SubscriptionTrialEligibility.eligible,
+      );
+      expect(details.trialEligibility, expected);
+      expect(details.hasFreeTrial, item.eligible);
+    }
   });
 
   test('Apple 逐订阅组查询试用资格，同组去重，失败和缺失组均保留未知', () async {

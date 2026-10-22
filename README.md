@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 1.0.3
+      ref: 1.0.4
 ```
 
 ### 1. 配置逻辑套餐

@@ -1,5 +1,6 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'app_store_trial.dart';
 import 'subscription_access_state.dart';
 import 'subscription_plan.dart';
 
@@ -188,14 +189,7 @@ class IosSubscriptionHelper {
     final groups = <String, SubscriptionTrialEligibility>{};
     final result = <String, SubscriptionTrialEligibility>{};
     for (final product in products) {
-      final hasTrial =
-          product.introductoryPricePaymentModeIOS == PaymentModeIOS.FreeTrial ||
-          (product.subscriptionOffers ?? <SubscriptionOffer>[]).any(
-            (offer) =>
-                offer.type == DiscountOfferType.Introductory &&
-                offer.paymentMode == PaymentMode.FreeTrial,
-          );
-      if (!hasTrial) {
+      if (!product.hasIntroductoryFreeTrial) {
         result[product.id] = SubscriptionTrialEligibility.ineligible;
         continue;
       }
