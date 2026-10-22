@@ -111,6 +111,7 @@ void main() {
     expect(details.hasFreeTrial, isTrue);
     expect(details.trialPeriod?.unit, SubscriptionPeriodUnit.Week);
     expect(details.trialPeriod?.value, 2);
+    expect(details.trialDays, 14);
     const monthly = SubscriptionPlan(
       googlePlay: GooglePlayPlan(
         productId: 'subscription',
@@ -258,7 +259,85 @@ void main() {
       appStoreTrialEligibility: SubscriptionTrialEligibility.eligible,
     );
     expect(eligible.hasFreeTrial, isTrue);
+    expect(eligible.trialDays, isNull);
     expect(eligible.offer, isNull);
+  });
+
+  test('两平台仅在符合资格且周期可精确按天表示时提供试用天数', () {
+    final cases = <({SubscriptionPeriod? period, int? days})>[
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Day,
+          value: 3,
+        ),
+        days: 3,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Week,
+          value: 1,
+        ),
+        days: 7,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Week,
+          value: 2,
+        ),
+        days: 14,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Month,
+          value: 1,
+        ),
+        days: null,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Year,
+          value: 1,
+        ),
+        days: null,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Unknown,
+          value: 2,
+        ),
+        days: null,
+      ),
+      (period: null, days: null),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Day,
+          value: 0,
+        ),
+        days: null,
+      ),
+      (
+        period: const SubscriptionPeriod(
+          unit: SubscriptionPeriodUnit.Week,
+          value: -1,
+        ),
+        days: null,
+      ),
+    ];
+    for (final store in [IapStore.Apple, IapStore.Google]) {
+      for (final eligibility in SubscriptionTrialEligibility.values) {
+        for (final item in cases) {
+          final details = SubscriptionPlanDetails(
+            plan: yearly,
+            store: store,
+            trialEligibility: eligibility,
+            trialPeriod: item.period,
+          );
+          final eligible = eligibility == SubscriptionTrialEligibility.eligible;
+          expect(details.trialDays, eligible ? item.days : null);
+          expect(details.hasFreeTrial, eligible);
+        }
+      }
+    }
   });
 
   test('展示兜底不可用于购买或平均价，缺少数值时不解析价格字符串', () {

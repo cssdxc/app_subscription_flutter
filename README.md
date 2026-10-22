@@ -108,7 +108,7 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `1.0.2`，公共接口不提供旧接口兼容层。
+当前 Git 发布版本为 `1.0.3`，公共接口不提供旧接口兼容层。
 接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
 
 ```yaml
@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 1.0.2
+      ref: 1.0.3
 ```
 
 ### 1. 配置逻辑套餐
@@ -193,6 +193,7 @@ final average = yearly.price?.averagePrice(
 final canBuy = yearly.canPurchase;
 final trialEligibility = yearly.trialEligibility;
 final trialPeriod = yearly.trialPeriod;
+final trialDays = yearly.trialDays;
 ```
 
 界面直接监听 `coordinator.plans`（`ValueListenable<List<SubscriptionPlanDetails>>`），
@@ -226,6 +227,9 @@ final trialPeriod = yearly.trialPeriod;
 - `trialPeriod` 是商店定义的免费总周期，不代表资格保证。
   Apple 使用 `period × periodCount`；Google 使用 `billingPeriod × billingCycleCount`。
   使用官方 `SubscriptionPeriodUnit` 保留日、周、月、年，不将一个月假定为 30 天。
+- `trialDays` 仅在明确符合试用资格且周期能精确按天表示时返回总天数：日直接取值，周乘以 7。
+  月、年、未知单位、缺失或无效周期，以及资格未知或不符合时返回 `null`。
+  `null` 不等于没有试用资格；资格仍读取 `trialEligibility/hasFreeTrial`，月、年文案使用 `trialPeriod`。
 
 ### 3. 购买、恢复与明确的结果分类
 

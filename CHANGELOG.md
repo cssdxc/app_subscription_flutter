@@ -1,5 +1,10 @@
 # 版本记录
 
+## 1.0.3
+
+- 将通用试用天数换算收敛到 `SubscriptionPlanDetails.trialDays`，接入方直接读取，无需再判断周期单位。
+- 仅在符合试用资格且周期为日或周时返回精确总天数；月、年及无法确定的情况返回 `null`，保留原始周期和资格供宿主展示。
+
 ## 1.0.2
 
 - 在 core 统一维护固定数字错误码，通过 `SubscriptionActionResult.numericCode` 直接读取，接入方无需重复映射。

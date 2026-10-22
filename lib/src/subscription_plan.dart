@@ -85,4 +85,20 @@ class SubscriptionPlanDetails {
   bool get canPurchase => product != null && failureCode == null;
   bool get hasFreeTrial =>
       trialEligibility == SubscriptionTrialEligibility.eligible;
+
+  /// 符合试用资格且能精确按天表示时返回总天数，周按七天换算。
+  /// 资格未知、不符合、周期缺失或无效，以及月、年、未知单位均返回空。
+  /// 空值不代表没有试用资格；资格仍以 trialEligibility 为准。
+  int? get trialDays {
+    if (!hasFreeTrial) return null;
+    final period = trialPeriod;
+    if (period == null || period.value <= 0) return null;
+    return switch (period.unit) {
+      SubscriptionPeriodUnit.Day => period.value,
+      SubscriptionPeriodUnit.Week => period.value * 7,
+      SubscriptionPeriodUnit.Month ||
+      SubscriptionPeriodUnit.Year ||
+      SubscriptionPeriodUnit.Unknown => null,
+    };
+  }
 }
