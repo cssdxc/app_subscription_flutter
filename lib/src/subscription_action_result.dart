@@ -1,5 +1,6 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'subscription_error_codes.dart';
 import 'subscription_failure.dart';
 
 /// 一次操作的互斥结果，调用方使用 switch 处理。
@@ -47,6 +48,25 @@ class SubscriptionActionResult {
 
   /// 只用于日志或上报，不用于业务分支判断。
   String? get code => failureCode?.code ?? storeErrorCode?.value;
+
+  /// 本库统一定义的数字错误码，并非 Apple 或 Google 的原生响应值。
+  /// 成功和等待返回空；取消为 1001，商店错误为 1001–1999，封装错误为 2001–2999。
+  /// 失败优先使用封装原因，无分类时为 2999；文案和展示由宿主负责。
+  int? get numericCode {
+    switch (outcome) {
+      case SubscriptionActionOutcome.success:
+      case SubscriptionActionOutcome.pending:
+        return null;
+      case SubscriptionActionOutcome.cancelled:
+        return storeErrorNumericCode(ErrorCode.UserCancelled);
+      case SubscriptionActionOutcome.failure:
+        final failure = failureCode;
+        if (failure != null) return failureNumericCode(failure);
+        final storeError = storeErrorCode;
+        return storeError == null ? 2999 : storeErrorNumericCode(storeError);
+    }
+  }
+
   bool get success => outcome == SubscriptionActionOutcome.success;
   bool get cancelled => outcome == SubscriptionActionOutcome.cancelled;
   bool get pending => outcome == SubscriptionActionOutcome.pending;

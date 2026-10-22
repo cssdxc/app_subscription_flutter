@@ -108,7 +108,7 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `1.0.1`，包含不兼容的公共接口精简，不提供旧接口兼容层。
+当前 Git 发布版本为 `1.0.2`，公共接口不提供旧接口兼容层。
 接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
 
 ```yaml
@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 1.0.1
+      ref: 1.0.2
 ```
 
 ### 1. 配置逻辑套餐
@@ -259,6 +259,11 @@ final restored = await coordinator.restore(source: 'settings');
 
 `failureCode` 只表示封装自身错误；`storeErrorCode` 保留插件官方 `ErrorCode`。
 `code/message` 供诊断或上报，不能作为业务分支。
+`numericCode` 是本库统一定义的固定数字错误码，并非 Apple 或 Google 的原生响应值。
+宿主直接读取该属性，并自行组合本地化文案，例如 `取消 (1001)`，无需再维护映射表。
+商店错误为 1001–1999，封装错误为 2001–2999；取消为 1001，未知商店错误为 1999，
+无具体分类的失败为 2999。成功和待处理返回 `null`。失败同时包含两类错误时优先使用封装原因。
+完整编号见[数字错误码](docs/error-codes.md)；编号显式固定，不随枚举顺序变化，业务判断继续使用枚举。
 购买前商品查询及交易处理遇到 `PurchaseError` 时保留原错误码，不统一改为连接失败。
 未查到有效权益返回 `subscriptionInactive`；StoreKit 分组状态查询失败返回
 `storeQueryFailed`，不把查询异常解释为订阅到期。
