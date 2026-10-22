@@ -108,7 +108,7 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `1.0.3`，公共接口不提供旧接口兼容层。
+当前 Git 发布版本为 `1.0.5`，公共接口不提供旧接口兼容层。
 接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
 
 ```yaml
@@ -116,7 +116,7 @@ dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 1.0.4
+      ref: 1.0.5
 ```
 
 ### 1. 配置逻辑套餐
@@ -199,6 +199,8 @@ final trialDays = yearly.trialDays;
 界面直接监听 `coordinator.plans`（`ValueListenable<List<SubscriptionPlanDetails>>`），
 商品、价格和资格变化会发布新快照。`planDetails` 也可在商品未加载时同步读取配置兜底。
 宿主无须再转发通知器。
+商品刷新时保留上一份完整数据，待新商品及试用资格查询完成后一起发布，
+不先发布临时的“资格未知”。实际查询失败仍更新为未知，不继续承诺试用。
 
 价格规则：
 
@@ -268,7 +270,7 @@ final restored = await coordinator.restore(source: 'settings');
 商店错误为 1001–1999，封装错误为 2001–2999；取消为 1001，未知商店错误为 1999，
 无具体分类的失败为 2999。成功和待处理返回 `null`。失败同时包含两类错误时优先使用封装原因。
 完整编号见[数字错误码](docs/error-codes.md)；编号显式固定，不随枚举顺序变化，业务判断继续使用枚举。
-购买前商品查询及交易处理遇到 `PurchaseError` 时保留原错误码，不统一改为连接失败。
+商品查询及交易处理遇到 `PurchaseError` 时保留原错误码，不统一改为连接失败。
 未查到有效权益返回 `subscriptionInactive`；StoreKit 分组状态查询失败返回
 `storeQueryFailed`，不把查询异常解释为订阅到期。
 购买完成、取消、等待与失败由单一 `outcome` 派生，不会出现多份布尔状态互相矛盾。
@@ -305,8 +307,12 @@ Android 的 `offerId`。本封装未提供需要签名的 App Store promotional 
 宿主在自己的展示层监听 `activity`，决定采用按钮转圈、页面占位还是全屏遮罩，
 并负责颜色、尺寸、动画、文案、交互拦截和失败提示。
 重复调用初始化、商品加载、试用资格查询或权益刷新会共用进行中的 Future。
-`loadProducts` 返回查询是否成功，成功时列表仍可能为空。购买前与回到前台会重新查询商品，
-避免用长期缓存的 Google Play 商品详情和优惠令牌发起购买；重新查询失败时不发送购买请求。
+`loadProducts` 返回查询是否成功，成功时列表仍可能为空。初始化和回到前台时查询商品，
+也可显式调用 `loadProducts(force: true)` 刷新；不设置定时轮询。
+购买复用已加载的商品和所选优惠；有商品刷新正在进行时等待完成，缺少商品时先查询。
+OpenIAP Google `4.0.3` 的原生 `requestPurchase` 已在构造购买参数前查询最新 `ProductDetails`，
+并校验传入的优惠令牌，core 不重复执行一次商品查询。失效优惠返回商店错误，不自动另选套餐。
+Google 未规定商品详情的固定失效分钟数。Apple 按商品 ID 发起购买，最终试用资格由 StoreKit 判断。
 恢复批次和购买事件使用同一队列，恢复期间到达的新交易仍会处理；仅跳过本次恢复中
 已成功处理的同一笔交易的重复事件，不建立永久去重缓存。
 事件按到达时正在等待的购买关联；排队的旧交易和其他商品交易按静默同步处理，

@@ -241,10 +241,14 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
               type: ProductQueryType.Subs,
             );
             if (_isDisposed) return;
+            // 等待旧商品的资格查询结束，新商品和资格准备完成后再一起发布。
+            await _trialFuture;
+            if (_isDisposed) return;
+            final eligibility = await _queryTrialEligibility(products);
+            if (_isDisposed) return;
+            _trialEligibility = eligibility;
             _products.value = List.unmodifiable(products);
-            _trialEligibility = const {};
             _publishPlans();
-            await refreshTrialEligibility();
           })
           .whenComplete(() => _productsFuture = null);
 
@@ -366,32 +370,42 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   /// 根据商店商品与账户状态刷新免费试用资格。
   Future<void> refreshTrialEligibility() {
     if (_isDisposed || !isConfigured) return Future.value();
-    return _trialFuture ??= _activity
-        .track(
-          SubscriptionOperation.checkingTrialEligibility,
-          _refreshTrialEligibility,
-        )
-        .whenComplete(() => _trialFuture = null);
+    // 商品刷新已包含针对新商品的资格查询，避免再查询旧商品。
+    if (_productsFuture case final loading?) {
+      return loading.catchError((Object error) {
+        _log('等待商品刷新失败: $error');
+      });
+    }
+    return _trialFuture ??= _refreshTrialEligibility().whenComplete(
+      () => _trialFuture = null,
+    );
   }
 
   Future<void> _refreshTrialEligibility() async {
-    try {
-      final eligibility = await _storeAdapter.queryTrialEligibility(
-        iap: _iap,
-        products: _products.value,
-      );
-      if (_isDisposed) return;
-      _trialEligibility = Map.unmodifiable(eligibility);
-      _publishPlans();
-    } catch (e) {
-      _log('检查订阅历史失败: $e');
-      if (_isDisposed) return;
-      _trialEligibility = const {};
-      _publishPlans();
-    }
+    final eligibility = await _queryTrialEligibility(_products.value);
+    if (_isDisposed) return;
+    _trialEligibility = eligibility;
+    _publishPlans();
   }
 
-  /// 按配置套餐加载商品、精确选择优惠，再等待商店事件。
+  Future<Map<String, SubscriptionTrialEligibility>> _queryTrialEligibility(
+    List<ProductSubscription> products,
+  ) =>
+      _activity.track(SubscriptionOperation.checkingTrialEligibility, () async {
+        try {
+          return Map.unmodifiable(
+            await _storeAdapter.queryTrialEligibility(
+              iap: _iap,
+              products: products,
+            ),
+          );
+        } catch (e) {
+          _log('检查订阅历史失败: $e');
+          return const {};
+        }
+      });
+
+  /// 按配置套餐选择已加载的商品和优惠，缺少商品时先查询，再等待商店事件。
   Future<SubscriptionActionResult> purchasePlan(
     SubscriptionPlan plan, {
     required String source,
@@ -411,8 +425,13 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           failureCode: initial.failureCode,
         );
       }
-      // Google 不建议长期缓存商品详情；查询异常交给操作层保留商店错误码。
-      await _loadProducts(force: true);
+      // OpenIAP Google 4.0.3 在购买时刷新原生商品详情并校验优惠令牌；
+      // Apple 按商品 ID 查找原生商品，本层不重复查询或重置展示资格。
+      if (_productsFuture case final loading?) {
+        await loading;
+      } else if (initial.product == null) {
+        await _loadProducts(force: true);
+      }
       if (_isDisposed)
         return SubscriptionActionResult.failure(
           type: SubscriptionActionType.purchase,

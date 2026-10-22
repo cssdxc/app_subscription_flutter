@@ -18,14 +18,15 @@ ProductSubscriptionIOS _appleProduct({
   String group = 'group',
   PaymentModeIOS paymentMode = PaymentModeIOS.FreeTrial,
   List<SubscriptionOffer>? offers,
+  double price = 12,
 }) => ProductSubscriptionIOS(
   id: id,
   currency: 'USD',
   description: '',
   title: '',
   displayNameIOS: '',
-  displayPrice: r'$12.00',
-  price: 12,
+  displayPrice: '\$${price.toStringAsFixed(2)}',
+  price: price,
   introductoryPricePaymentModeIOS: paymentMode,
   subscriptionOffers: offers,
   subscriptionGroupIdIOS: group,
@@ -152,7 +153,7 @@ void main() {
     }
   }
 
-  test('购买前商品查询失败保留商店错误码，不改成连接不可用', () async {
+  test('缺少商品时购买先查询，查询失败保留商店错误码', () async {
     var failQuery = false;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_channel, (call) async {
@@ -163,7 +164,7 @@ void main() {
             case 'fetchProducts':
               if (failQuery)
                 throw PlatformException(code: ErrorCode.ItemUnavailable.value);
-              return [_appleProduct().toJson()];
+              return [];
             case 'requestPurchase':
               fail('商品查询失败时不应发起购买');
           }
@@ -460,12 +461,14 @@ void main() {
     final requested = Completer<void>();
     Object? payload;
     List<dynamic>? skus;
+    var fetchCalls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_channel, (call) async {
           switch (call.method) {
             case 'initConnection':
               return true;
             case 'fetchProducts':
+              fetchCalls++;
               skus = (call.arguments as Map)['skus'] as List;
               return [product.toJson()];
             case 'requestPurchase':
@@ -484,6 +487,7 @@ void main() {
       ),
     );
     final coordinator = await _create(android: true, plans: [monthly, plan]);
+    await coordinator.init();
     final buying = coordinator.purchasePlan(
       plan,
       source: 'yearly',
@@ -493,6 +497,7 @@ void main() {
     );
     await requested.future;
     expect(skus, ['subscription']);
+    expect(fetchCalls, 1);
     final google = payload as Map;
     expect(
       (google['subscriptionOffers'] as List).single['offerToken'],
@@ -584,21 +589,25 @@ void main() {
     await Future<void>.delayed(Duration.zero);
   });
 
-  test('购买前刷新商品失败时不使用旧商品发起购买', () async {
-    bool failFetch = false;
+  test('已加载商品购买不重复查询商品或资格，取消不清空试用状态', () async {
+    int fetchCalls = 0;
+    int eligibilityCalls = 0;
     int purchaseRequests = 0;
+    var requested = Completer<void>();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_channel, (call) async {
           switch (call.method) {
             case 'initConnection':
               return true;
             case 'fetchProducts':
-              if (failFetch) throw PlatformException(code: 'E_NETWORK_ERROR');
+              fetchCalls++;
               return [_appleProduct().toJson()];
             case 'isEligibleForIntroOfferIOS':
-              return false;
+              eligibilityCalls++;
+              return true;
             case 'requestPurchase':
               purchaseRequests++;
+              requested.complete();
               return null;
             case 'endConnection':
               return true;
@@ -606,16 +615,184 @@ void main() {
           return null;
         });
     final coordinator = await _create();
-    expect(await coordinator.loadProducts(), isTrue);
-    failFetch = true;
-    final result = await coordinator.purchasePlan(
-      _applePlan,
-      source: 'refresh_failed',
-    );
-    expect(result.storeErrorCode, ErrorCode.NetworkError);
-    expect(result.failureCode, isNull);
-    expect(purchaseRequests, 0);
+    await coordinator.init();
+    expect(coordinator.planDetails(_applePlan).hasFreeTrial, isTrue);
+    final updates = <SubscriptionTrialEligibility>[];
+    coordinator.plans.addListener(() {
+      updates.add(coordinator.plans.value.single.trialEligibility);
+    });
+    for (var i = 0; i < 2; i++) {
+      requested = Completer<void>();
+      final buying = coordinator.purchasePlan(_applePlan, source: 'test');
+      await requested.future;
+      expect(coordinator.planDetails(_applePlan).hasFreeTrial, isTrue);
+      expect(coordinator.activity.value.isLoadingProducts, isFalse);
+      await _emit('purchase-error', {'code': ErrorCode.UserCancelled.value});
+      expect((await buying).cancelled, isTrue);
+    }
+    expect(fetchCalls, 1);
+    expect(eligibilityCalls, 1);
+    expect(purchaseRequests, 2);
+    expect(updates, isEmpty);
     expect(coordinator.activity.value.isLoading, isFalse);
+  });
+
+  test('购买等待正在进行的商品刷新，刷新失败时不发送购买请求', () async {
+    final fetching = Completer<void>();
+    final gate = Completer<void>();
+    var refreshing = false;
+    var fetchCalls = 0;
+    var purchaseRequests = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              fetchCalls++;
+              if (refreshing) {
+                fetching.complete();
+                await gate.future;
+                throw PlatformException(code: ErrorCode.NetworkError.value);
+              }
+              return [_appleProduct().toJson()];
+            case 'isEligibleForIntroOfferIOS':
+              return true;
+            case 'requestPurchase':
+              purchaseRequests++;
+              return null;
+          }
+          return null;
+        });
+    final coordinator = await _create();
+    await coordinator.init();
+    refreshing = true;
+    final loading = coordinator.loadProducts(force: true);
+    await fetching.future;
+    final checking = coordinator.refreshTrialEligibility();
+    final buying = coordinator.purchasePlan(_applePlan, source: 'refreshing');
+    await Future<void>.delayed(Duration.zero);
+    expect(purchaseRequests, 0);
+    gate.complete();
+    expect(await loading, isFalse);
+    await checking;
+    expect((await buying).storeErrorCode, ErrorCode.NetworkError);
+    expect(fetchCalls, 2);
+    expect(purchaseRequests, 0);
+    expect(coordinator.planDetails(_applePlan).hasFreeTrial, isTrue);
+  });
+
+  for (final eligibility in [true, false, null]) {
+    test('商品刷新完整发布价格和资格：$eligibility', () async {
+      final querying = Completer<void>();
+      final gate = Completer<void>();
+      var refreshing = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            switch (call.method) {
+              case 'initConnection':
+              case 'endConnection':
+                return true;
+              case 'fetchProducts':
+                return [_appleProduct(price: refreshing ? 24 : 12).toJson()];
+              case 'isEligibleForIntroOfferIOS':
+                if (!refreshing) return true;
+                querying.complete();
+                await gate.future;
+                if (eligibility == null) {
+                  throw PlatformException(code: ErrorCode.ServiceError.value);
+                }
+                return eligibility;
+            }
+            return null;
+          });
+      final coordinator = await _create();
+      await coordinator.init();
+      final planUpdates = <SubscriptionPlanDetails>[];
+      final productUpdates = <SubscriptionPlanDetails>[];
+      coordinator.plans.addListener(() {
+        planUpdates.add(coordinator.plans.value.single);
+      });
+      coordinator.products.addListener(() {
+        productUpdates.add(coordinator.planDetails(_applePlan));
+      });
+      refreshing = true;
+      final loading = coordinator.loadProducts(force: true);
+      await querying.future;
+      final checking = coordinator.refreshTrialEligibility();
+      expect(coordinator.plans.value.single.hasFreeTrial, isTrue);
+      expect(coordinator.planDetails(_applePlan).price?.amount, 12);
+      expect(coordinator.products.value.single.price, 12);
+      expect(planUpdates, isEmpty);
+      expect(productUpdates, isEmpty);
+      gate.complete();
+      expect(await loading, isTrue);
+      await checking;
+      final expected = switch (eligibility) {
+        true => SubscriptionTrialEligibility.eligible,
+        false => SubscriptionTrialEligibility.ineligible,
+        null => SubscriptionTrialEligibility.unknown,
+      };
+      expect(planUpdates, hasLength(1));
+      expect(productUpdates, hasLength(1));
+      for (final update in [...planUpdates, ...productUpdates]) {
+        expect(update.price?.amount, 24);
+        expect(update.trialEligibility, expected);
+      }
+    });
+  }
+
+  test('旧资格查询完成后，商品刷新仍按新商品查询资格', () async {
+    final oldQuerying = Completer<void>();
+    final releaseOldQuery = Completer<void>();
+    final fetched = Completer<void>();
+    var queryCalls = 0;
+    var refreshing = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              if (refreshing) fetched.complete();
+              return [
+                _appleProduct(
+                  group: refreshing ? 'new-group' : 'group',
+                ).toJson(),
+              ];
+            case 'isEligibleForIntroOfferIOS':
+              queryCalls++;
+              final group = (call.arguments as Map)['productId'];
+              if (queryCalls == 2) {
+                oldQuerying.complete();
+                await releaseOldQuery.future;
+              }
+              return group == 'group';
+          }
+          return null;
+        });
+    final coordinator = await _create();
+    await coordinator.init();
+    final oldChecking = coordinator.refreshTrialEligibility();
+    await oldQuerying.future;
+    refreshing = true;
+    final loading = coordinator.loadProducts(force: true);
+    await fetched.future;
+    releaseOldQuery.complete();
+    await oldChecking;
+    expect(await loading, isTrue);
+    expect(queryCalls, 3);
+    expect(
+      coordinator.plans.value.single.trialEligibility,
+      SubscriptionTrialEligibility.ineligible,
+    );
+    expect(
+      (coordinator.products.value.single as ProductSubscriptionIOS)
+          .subscriptionGroupIdIOS,
+      'new-group',
+    );
   });
 
   test('Apple 商品解析与资格查询一致识别首次免费试用，排除普通折扣和促销', () async {
