@@ -156,7 +156,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     const [],
   );
 
-  /// 套餐的价格、可购买状态和试用资格变化时发布新快照。
+  /// 商品与试用资格查询完成后一起发布；刷新期间保留上一份完整快照。
   ValueListenable<List<SubscriptionPlanDetails>> get plans => _plans;
 
   void _publishPlans() {

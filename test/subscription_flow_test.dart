@@ -637,6 +637,103 @@ void main() {
     expect(coordinator.activity.value.isLoading, isFalse);
   });
 
+  test('双套餐购买与商品刷新并行时只发布完整试用资格', () async {
+    const yearlyPlan = SubscriptionPlan(appStoreProductId: 'yearly');
+    var requested = Completer<void>();
+    final querying = Completer<void>();
+    final releaseQuery = Completer<void>();
+    var refreshing = false;
+    var fetchCalls = 0;
+    var eligibilityCalls = 0;
+    final requestedIds = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              fetchCalls++;
+              return [
+                _appleProduct(id: 'yearly', price: 50).toJson(),
+                _appleProduct().toJson(),
+              ];
+            case 'isEligibleForIntroOfferIOS':
+              eligibilityCalls++;
+              if (refreshing) {
+                querying.complete();
+                await releaseQuery.future;
+                return false;
+              }
+              return true;
+            case 'requestPurchase':
+              requested.complete();
+              return null;
+          }
+          return null;
+        });
+    final coordinator = await _create(plans: [_applePlan, yearlyPlan]);
+    await coordinator.init();
+    final snapshots = <List<SubscriptionTrialEligibility>>[];
+    void capture() => snapshots.add([
+      for (final plan in coordinator.plans.value) plan.trialEligibility,
+    ]);
+    coordinator.plans.addListener(capture);
+    coordinator.activity.addListener(capture);
+
+    final buying = coordinator.purchasePlan(_applePlan, source: 'continue');
+    await requested.future;
+    requestedIds.add(coordinator.activity.value.productId!);
+    expect(fetchCalls, 1);
+    expect(eligibilityCalls, 1);
+    refreshing = true;
+    final loading = coordinator.loadProducts(force: true);
+    await querying.future;
+    expect(coordinator.plans.value.map((plan) => plan.hasFreeTrial), [
+      true,
+      true,
+    ]);
+    expect(
+      coordinator.planDetails(yearlyPlan).trialEligibility,
+      SubscriptionTrialEligibility.eligible,
+    );
+    releaseQuery.complete();
+    expect(await loading, isTrue);
+    expect(coordinator.plans.value.map((plan) => plan.hasFreeTrial), [
+      false,
+      false,
+    ]);
+    await _emit('purchase-error', {'code': ErrorCode.UserCancelled.value});
+    expect((await buying).cancelled, isTrue);
+
+    requested = Completer<void>();
+    final retrying = coordinator.purchasePlan(yearlyPlan, source: 'continue');
+    await requested.future;
+    requestedIds.add(coordinator.activity.value.productId!);
+    await _emit('purchase-error', {'code': ErrorCode.UserCancelled.value});
+    expect((await retrying).cancelled, isTrue);
+    expect(requestedIds, ['monthly', 'yearly']);
+    expect(fetchCalls, 2);
+    expect(eligibilityCalls, 2);
+    expect(snapshots, isNotEmpty);
+    for (final snapshot in snapshots) {
+      expect(
+        snapshot,
+        anyOf(
+          equals([
+            SubscriptionTrialEligibility.eligible,
+            SubscriptionTrialEligibility.eligible,
+          ]),
+          equals([
+            SubscriptionTrialEligibility.ineligible,
+            SubscriptionTrialEligibility.ineligible,
+          ]),
+        ),
+      );
+    }
+    expect(coordinator.activity.value.isLoading, isFalse);
+  });
+
   test('购买等待正在进行的商品刷新，刷新失败时不发送购买请求', () async {
     final fetching = Completer<void>();
     final gate = Completer<void>();
