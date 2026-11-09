@@ -1,6 +1,6 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
-import 'subscription_access_state.dart';
+import 'subscription_snapshot.dart';
 import 'subscription_transaction.dart';
 import 'subscription_failure.dart';
 import 'subscription_plan.dart';
@@ -8,12 +8,6 @@ import 'subscription_plan.dart';
 /// 查询一个 App Store 订阅组的 StoreKit 2 状态；主要用于测试替换默认查询。
 typedef SubscriptionStatusQueryIOS =
     Future<List<SubscriptionStatusIOS>> Function(String productId);
-
-/// 商店权益查询结果，以及因查询异常而未能确定状态的商品集合。
-typedef SubscriptionAccessResolution = ({
-  SubscriptionAccessState state,
-  Set<String> queryFailedProductIds,
-});
 
 /// 发起订阅购买时传给对应商店的可选参数。
 class SubscriptionPurchaseOptions {
@@ -23,7 +17,11 @@ class SubscriptionPurchaseOptions {
     this.obfuscatedAccountIdAndroid,
     this.obfuscatedProfileIdAndroid,
     this.isOfferPersonalizedAndroid,
+    this.replacementAndroid,
   });
+
+  /// Google Play 替换已有购买的参数；Apple 直接由商店处理。
+  final GooglePlayReplacement? replacementAndroid;
 
   /// 关联 App Store 交易与应用账户的 UUID 字符串。
   final String? appAccountTokenIOS;
@@ -69,13 +67,12 @@ abstract interface class SubscriptionStoreAdapter {
     required Purchase purchase,
   });
 
-  /// 将已验证的商店订阅解析为统一权益状态。
-  Future<SubscriptionAccessResolution> resolveVerifiedAccessState({
+  /// 将已验证的商店订阅解析为快照；productIds 为 null 时不按商品过滤。
+  Future<SubscriptionSnapshot> resolveVerifiedAccessState({
     required FlutterInappPurchase iap,
     required List<ActiveSubscription> subscriptions,
     required List<ProductSubscription> products,
-    required List<String> productIds,
-    required String fallbackProductId,
+    required List<String>? productIds,
     DateTime? now,
   });
 
@@ -87,4 +84,17 @@ abstract interface class SubscriptionStoreAdapter {
 
   /// 将平台购买对象转换为统一交易回传载荷。
   SubscriptionTransactionPayload transactionPayload(Purchase purchase);
+}
+
+/// Google Play 官方商品替换参数；不表示业务档位或 Apple 等级。
+class GooglePlayReplacement {
+  const GooglePlayReplacement({
+    required this.purchaseToken,
+    required this.oldProductId,
+    required this.mode,
+  });
+
+  final String purchaseToken;
+  final String oldProductId;
+  final SubscriptionReplacementModeAndroid mode;
 }

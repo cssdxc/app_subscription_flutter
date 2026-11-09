@@ -1,5 +1,18 @@
 # 版本记录
 
+## 2.0.2（2026-11-09）
+
+- 在售套餐与权益识别分离：默认查询本 App 全部订阅，无需注册历史 SKU；`plans` 仅用于当前购买和价格展示。
+- 增加可选 `subscriptionProductIds` 限制识别范围；服务端请求中的 `productIds` 支持 `null` 表示全部订阅，空列表不授权。
+- 支持 `plans: []` 仅查询权益；历史订阅恢复、事件和缓存不再受在售列表过滤，并排除普通内购的完成/确认。
+- **不兼容变更**：`accessState` 与 `refreshAccessState()` 返回 `SubscriptionSnapshot`，保留多条订阅记录；原单条状态字段迁至 `subscriptions`，旧缓存自动读取迁移。
+- 当前商品与续订目标分开，保留商店、Apple 原始交易/组标识、Android 购买令牌及已验证 base plan；插件不定义业务档位或 Apple 等级。
+- Apple 按已验证续订身份关联状态；购买结果区分 `applied/scheduled`，新增 `unconfirmed` 和有限等待，迟到交易仍同步。
+- 增加权威验证回调 `verifiedSubscriptionQuery`，在完成交易前提交原始购买；`transactionReporter` 继续只承担独立记录。
+- Google 支持官方旧 token 与商品替换参数。显式替换需要服务端明细验证，本地不采用商品目录推断已购 base plan。
+- 逐记录缓存保留原始证据时间，已知到期、续订及缓存边界触发查询；不模拟续订，不自动重试付款。
+- 移除商店适配契约中无效的全局 `fallbackProductId` 参数；增加替换错误码 2025/2026，更新接入与迁移文档。
+
 ## 2.0.1
 
 - 将主分支已完成的试用状态修复发布到 `2.0.x`：购买复用已加载商品，商品刷新完成后统一发布价格与试用资格，避免 Continue 点击后免费状态闪烁。

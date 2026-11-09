@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
-import 'subscription_access_state.dart';
 import 'subscription_action_result.dart';
 import 'subscription_configuration.dart';
 import 'subscription_failure.dart';
@@ -15,7 +14,7 @@ class SubscriptionTransactionProcessor {
     required this.iap,
     required this.adapter,
     required this.productIds,
-    required this.resolveAccess,
+    required this.verifyEntitlement,
     required this.isDisposed,
     required this.log,
     this.reporter,
@@ -24,9 +23,8 @@ class SubscriptionTransactionProcessor {
 
   final FlutterInappPurchase iap;
   final SubscriptionStoreAdapter adapter;
-  final List<String> productIds;
-  final Future<SubscriptionAccessState?> Function(String productId)
-  resolveAccess;
+  final List<String>? productIds;
+  final Future<void> Function(Purchase) verifyEntitlement;
   final bool Function() isDisposed;
   final SubscriptionLogger log;
   final SubscriptionTransactionReporter? reporter;
@@ -52,7 +50,8 @@ class SubscriptionTransactionProcessor {
     );
 
     if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
-    if (productId.isEmpty || !productIds.contains(productId)) {
+    if (productId.isEmpty ||
+        (productIds != null && !productIds!.contains(productId))) {
       return failure(SubscriptionFailureCode.unknownSku);
     }
     if (purchase.purchaseState == PurchaseState.Pending) {
@@ -68,16 +67,9 @@ class SubscriptionTransactionProcessor {
     try {
       await adapter.verifyPurchaseLocally(iap: iap, purchase: purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
-      final access = await resolveAccess(productId);
+      await verifyEntitlement(purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
-      if (access?.shouldGrantAccess != true) {
-        return failure(
-          access?.reason == SubscriptionAccessReason.storeQueryFailed
-              ? SubscriptionFailureCode.storeQueryFailed
-              : SubscriptionFailureCode.subscriptionInactive,
-        );
-      }
-
+      // 真实购买完成与当前权益有效性分别处理；历史或延后生效购买也要完成。
       await adapter.finishTransaction(iap: iap, purchase: purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
       // 商店交易完成后独立记录，回调不属于购买完成条件。

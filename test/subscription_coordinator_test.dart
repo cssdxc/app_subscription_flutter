@@ -40,6 +40,7 @@ SubscriptionCoordinator _coordinator({
           fallbackPrice: '\$19.99',
         ),
       ],
+      subscriptionProductIds: const ['subscribe_month_1'],
       activeSubscriptionQuery: query,
       subscriptionStatusQueryIOS:
           subscriptionStatusQueryIOS ??
@@ -89,12 +90,15 @@ void main() {
         },
       );
 
-      final SubscriptionAccessState resolvedState = await coordinator
+      final SubscriptionSnapshot resolvedState = await coordinator
           .refreshAccessState(source: 'test');
 
-      expect(resolvedState.status, SubscriptionAccessStatus.active);
       expect(
-        coordinator.accessState.value.status,
+        resolvedState.subscriptions.single.status,
+        SubscriptionAccessStatus.active,
+      );
+      expect(
+        coordinator.accessState.value.subscriptions.single.status,
         SubscriptionAccessStatus.active,
       );
       expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
@@ -128,13 +132,16 @@ void main() {
       );
 
       await coordinator.init();
-      final SubscriptionAccessState resolvedState = await coordinator
+      final SubscriptionSnapshot resolvedState = await coordinator
           .refreshAccessState(source: 'test');
 
       expect(queryCalls, 1);
-      expect(resolvedState.status, SubscriptionAccessStatus.active);
       expect(
-        coordinator.accessState.value.status,
+        resolvedState.subscriptions.single.status,
+        SubscriptionAccessStatus.active,
+      );
+      expect(
+        coordinator.accessState.value.subscriptions.single.status,
         SubscriptionAccessStatus.active,
       );
       expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
@@ -154,10 +161,13 @@ void main() {
       storeKitState: 'expired',
     );
 
-    final SubscriptionAccessState resolvedState = await coordinator
+    final SubscriptionSnapshot resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.expired);
+    expect(
+      resolvedState.subscriptions.single.status,
+      SubscriptionAccessStatus.expired,
+    );
     expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
@@ -182,10 +192,13 @@ void main() {
     );
 
     await coordinator.init();
-    final SubscriptionAccessState resolvedState = await coordinator
+    final SubscriptionSnapshot resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.expired);
+    expect(
+      resolvedState.subscriptions.single.status,
+      SubscriptionAccessStatus.expired,
+    );
     expect(resolvedState.shouldGrantAccess, isFalse);
     expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
@@ -211,10 +224,13 @@ void main() {
     );
 
     await coordinator.init();
-    final SubscriptionAccessState resolvedState = await coordinator
+    final SubscriptionSnapshot resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.unavailable);
+    expect(
+      resolvedState.subscriptions.single.status,
+      SubscriptionAccessStatus.unavailable,
+    );
     expect(resolvedState.shouldGrantAccess, isFalse);
     expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
@@ -243,14 +259,17 @@ void main() {
 
     await coordinator.init();
     expect(
-      coordinator.accessState.value.status,
+      coordinator.accessState.value.subscriptions.single.status,
       SubscriptionAccessStatus.unavailable,
     );
 
-    final SubscriptionAccessState resolvedState = await coordinator
+    final SubscriptionSnapshot resolvedState = await coordinator
         .refreshAccessState(source: 'test');
 
-    expect(resolvedState.status, SubscriptionAccessStatus.unavailable);
+    expect(
+      resolvedState.subscriptions.single.status,
+      SubscriptionAccessStatus.unavailable,
+    );
     expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
   });
 
@@ -267,7 +286,7 @@ void main() {
       },
     );
     void onStateChanged() {
-      if (coordinator.accessState.value.status ==
+      if (coordinator.accessState.value.subscriptions.single.status ==
               SubscriptionAccessStatus.active &&
           !stateCompleter.isCompleted) {
         stateCompleter.complete();
@@ -282,7 +301,7 @@ void main() {
 
     expect(queryCalls, 1);
     expect(
-      coordinator.accessState.value.status,
+      coordinator.accessState.value.subscriptions.single.status,
       SubscriptionAccessStatus.active,
     );
     expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
@@ -432,68 +451,65 @@ void main() {
     },
   );
 
-  test(
-    'restore does not report transaction when native status is unavailable and only cached access grants entitlement',
-    () async {
-      final int cachedAt = DateTime.now().millisecondsSinceEpoch;
-      SharedPreferences.setMockInitialValues(<String, Object>{
-        cacheKey: jsonEncode(
-          SubscriptionAccessState(
-            status: SubscriptionAccessStatus.active,
-            evaluatedAtMs: cachedAt,
-            effectiveUntilMs: cachedAt + 10000,
-            productId: 'subscribe_month_1',
-            transactionId: 'tx-cache',
-          ).toJson(),
-        ),
-      });
-      final SharedPreferences prefs = await SharedPreferences.getInstance();
-      int reportCalls = 0;
-      final PurchaseIOS purchase = _purchase(
-        transactionId: 'tx-native-purchase',
-        originalTransactionId: 'original-native-purchase',
-      );
-      final SubscriptionCoordinator coordinator = _coordinator(
-        prefs: prefs,
-        query: (productIds) async => throw Exception('native unavailable'),
-        transactionReporter: (payload) async {
-          reportCalls++;
-        },
-      );
+  test('Apple 已验证购买可完成并记录，缓存不能使恢复返回有效权益', () async {
+    final int cachedAt = DateTime.now().millisecondsSinceEpoch;
+    SharedPreferences.setMockInitialValues(<String, Object>{
+      cacheKey: jsonEncode(
+        SubscriptionAccessState(
+          status: SubscriptionAccessStatus.active,
+          evaluatedAtMs: cachedAt,
+          effectiveUntilMs: cachedAt + 10000,
+          productId: 'subscribe_month_1',
+          transactionId: 'tx-cache',
+        ).toJson(),
+      ),
+    });
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    int reportCalls = 0;
+    final PurchaseIOS purchase = _purchase(
+      transactionId: 'tx-native-purchase',
+      originalTransactionId: 'original-native-purchase',
+    );
+    final SubscriptionCoordinator coordinator = _coordinator(
+      prefs: prefs,
+      query: (productIds) async => throw Exception('native unavailable'),
+      transactionReporter: (payload) async {
+        reportCalls++;
+      },
+    );
 
-      await coordinator.init();
+    await coordinator.init();
 
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
+          switch (call.method) {
+            case 'initConnection':
+              return true;
+            case 'restorePurchases':
+              return true;
+            case 'getAvailableItems':
+              return <dynamic>[purchase.toJson()];
+            case 'isTransactionVerifiedIOS':
+              return true;
+            case 'finishTransaction':
+              return null;
+          }
+          return null;
+        });
+    addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, (MethodCall call) async {
-            switch (call.method) {
-              case 'initConnection':
-                return true;
-              case 'restorePurchases':
-                return true;
-              case 'getAvailableItems':
-                return <dynamic>[purchase.toJson()];
-              case 'isTransactionVerifiedIOS':
-                return true;
-              case 'finishTransaction':
-                return null;
-            }
-            return null;
-          });
-      addTearDown(() {
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(_iapChannel, null);
-      });
+          .setMockMethodCallHandler(_iapChannel, null);
+    });
 
-      final SubscriptionActionResult result = await coordinator.restore(
-        source: 'test',
-      );
+    final SubscriptionActionResult result = await coordinator.restore(
+      source: 'test',
+    );
 
-      expect(result.success, isFalse);
-      expect(
-        coordinator.accessState.value.status,
-        SubscriptionAccessStatus.active,
-      );
-      expect(reportCalls, 0);
-    },
-  );
+    expect(result.success, isFalse);
+    expect(
+      coordinator.accessState.value.subscriptions.single.status,
+      SubscriptionAccessStatus.active,
+    );
+    expect(reportCalls, 1);
+  });
 }

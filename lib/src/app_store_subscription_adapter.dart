@@ -1,6 +1,7 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_access_state.dart';
+import 'subscription_snapshot.dart';
 import 'subscription_failure.dart';
 import 'subscription_plan.dart';
 import 'subscription_store_adapter.dart';
@@ -85,30 +86,18 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
   }
 
   @override
-  Future<SubscriptionAccessResolution> resolveVerifiedAccessState({
+  Future<SubscriptionSnapshot> resolveVerifiedAccessState({
     required FlutterInappPurchase iap,
     required List<ActiveSubscription> subscriptions,
     required List<ProductSubscription> products,
-    required List<String> productIds,
-    required String fallbackProductId,
+    required List<String>? productIds,
     DateTime? now,
   }) async {
     final List<_AppStoreSubscriptionGroup> groups = _resolveSubscriptionGroups(
       products: products,
+      subscriptions: subscriptions,
       productIds: productIds,
     );
-    if (groups.isEmpty) {
-      return (
-        state: SubscriptionAccessState(
-          status: SubscriptionAccessStatus.unavailable,
-          evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-          productId: fallbackProductId,
-          note: 'no App Store subscription product configured',
-        ),
-        queryFailedProductIds: const <String>{},
-      );
-    }
-
     final SubscriptionStatusQueryIOS query =
         subscriptionStatusQuery ?? iap.subscriptionStatusIOS;
     final List<SubscriptionAccessState> groupStates =
@@ -126,21 +115,28 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
                   group.productIds.contains(subscription.productId),
             )
             .toList(growable: false);
-        groupStates.add(
+        groupStates.addAll(
           IosSubscriptionHelper.resolveAccessStateFromSubscriptionStatuses(
-            statuses,
-            verifiedEntitlements: verifiedEntitlements,
-            fallbackProductId: group.representativeProductId,
-            now: now,
-          ),
+                statuses,
+                verifiedEntitlements: verifiedEntitlements,
+                fallbackProductId: group.productIds.first,
+                now: now,
+              )
+              .map(
+                (state) => state.copyWith(
+                  subscriptionGroupIdIOS: group.subscriptionGroupId,
+                ),
+              )
+              .where((state) => group.productIds.contains(state.productId)),
         );
       } catch (error) {
         queryFailedProductIds.addAll(group.productIds);
         groupStates.add(
           SubscriptionAccessState(
+            store: IapStore.Apple,
             status: SubscriptionAccessStatus.unavailable,
             evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-            productId: group.representativeProductId,
+            productId: group.productIds.first,
             note: 'StoreKit subscription status unavailable: $error',
             reason: SubscriptionAccessReason.storeQueryFailed,
           ),
@@ -148,57 +144,44 @@ class AppStoreSubscriptionAdapter implements SubscriptionStoreAdapter {
       }
     }
 
-    final state = IosSubscriptionHelper.selectMostRelevantAccessState(
-      groupStates,
-    );
-    return (
-      state: !state.shouldGrantAccess && queryFailedProductIds.isNotEmpty
-          ? groupStates.firstWhere(
-              (state) =>
-                  state.reason == SubscriptionAccessReason.storeQueryFailed,
-            )
-          : state,
-      queryFailedProductIds: Set.unmodifiable(queryFailedProductIds),
+    return SubscriptionSnapshot(
+      evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+      subscriptions: groupStates,
+      queryFailedProductIds: queryFailedProductIds,
     );
   }
 
   List<_AppStoreSubscriptionGroup> _resolveSubscriptionGroups({
     required List<ProductSubscription> products,
-    required List<String> productIds,
+    required List<ActiveSubscription> subscriptions,
+    required List<String>? productIds,
   }) {
-    final Set<String> configuredProductIds = productIds.toSet();
-    final Map<String, Set<String>> productIdsByGroup = <String, Set<String>>{};
-
-    for (final ProductSubscriptionIOS product
-        in products.whereType<ProductSubscriptionIOS>()) {
-      if (!configuredProductIds.contains(product.id)) {
-        continue;
-      }
-      final String subscriptionGroupId = (product.subscriptionGroupIdIOS ?? '')
-          .trim();
-      final String groupKey = subscriptionGroupId.isEmpty
-          ? 'product:${product.id}'
-          : 'group:$subscriptionGroupId';
-      productIdsByGroup.putIfAbsent(groupKey, () => <String>{}).add(product.id);
+    final groupByProduct = <String, String?>{
+      for (final product in products.whereType<ProductSubscriptionIOS>())
+        product.id: product.subscriptionGroupIdIOS,
+    };
+    for (final subscription in subscriptions) {
+      groupByProduct[subscription.productId] ??=
+          IosSubscriptionHelper.subscriptionGroupId(subscription);
     }
-
-    final Set<String> resolvedProductIds = productIdsByGroup.values
-        .expand((ids) => ids)
-        .toSet();
-    for (final String productId in productIds) {
-      if (!resolvedProductIds.contains(productId)) {
-        productIdsByGroup['product:$productId'] = <String>{productId};
-      }
+    final idsByGroup = <String, Set<String>>{};
+    // 已加载商品优先作为组内查询入口，历史交易不需要再次注册或上架。
+    for (final id in {...groupByProduct.keys, ...?productIds}) {
+      final groupId = groupByProduct[id]?.trim() ?? '';
+      final key = groupId.isEmpty ? 'product:$id' : 'group:$groupId';
+      idsByGroup.putIfAbsent(key, () => <String>{}).add(id);
     }
-
-    return productIdsByGroup.values
-        .map(
-          (ids) => _AppStoreSubscriptionGroup(
+    return [
+      for (final ids in idsByGroup.values)
+        if (productIds == null || ids.any(productIds.contains))
+          _AppStoreSubscriptionGroup(
             representativeProductId: ids.first,
-            productIds: ids,
+            productIds: productIds == null
+                ? ids
+                : ids.where(productIds.contains).toSet(),
+            subscriptionGroupId: groupByProduct[ids.first],
           ),
-        )
-        .toList(growable: false);
+    ];
   }
 
   @override
@@ -220,11 +203,14 @@ class _AppStoreSubscriptionGroup {
   const _AppStoreSubscriptionGroup({
     required this.representativeProductId,
     required this.productIds,
+    this.subscriptionGroupId,
   });
 
   /// 用于调用 `subscriptionStatusIOS` 的组内代表商品。
   final String representativeProductId;
 
-  /// 属于该订阅组且由当前应用管理的商品标识。
+  final String? subscriptionGroupId;
+
+  /// 本次查询识别出的同组商品，包含仍有效的历史商品。
   final Set<String> productIds;
 }

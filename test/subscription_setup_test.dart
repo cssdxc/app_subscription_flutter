@@ -23,7 +23,7 @@ void main() {
   });
 
   for (final platform in [Platform.iOS, Platform.android, Platform.linux]) {
-    test('$platform 空配置可直接创建和释放，不访问商店或授予缓存权益', () async {
+    test('$platform 无在售且显式空权益范围不访问商店或授予缓存权益', () async {
       final calls = <String>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(_channel, (call) async {
@@ -45,6 +45,7 @@ void main() {
         ),
         config: SubscriptionCoordinatorConfig(
           plans: const [],
+          subscriptionProductIds: const [],
           actionObserver: events.add,
         ),
       );

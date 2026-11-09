@@ -1,3 +1,5 @@
+import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
+
 /// 统一描述各应用商店返回的订阅权益状态。
 enum SubscriptionAccessStatus {
   /// 订阅有效，可以授予权益。
@@ -29,7 +31,7 @@ enum SubscriptionAccessReason {
   localVerificationFailed,
 }
 
-/// 订阅模块对外提供的统一权益快照。
+/// 一项商店订阅的已验证状态；不表达宿主业务档位或功能。
 class SubscriptionAccessState {
   /// 创建一份不可变的订阅权益快照。
   const SubscriptionAccessState({
@@ -40,7 +42,24 @@ class SubscriptionAccessState {
     this.transactionId = '',
     this.note,
     this.reason,
+    this.store = IapStore.Unknown,
+    this.basePlanIdAndroid,
+    this.purchaseTokenAndroid,
+    this.subscriptionGroupIdIOS,
+    this.originalTransactionId,
+    this.renewal,
+    this.fromCache = false,
   });
+
+  final IapStore store;
+  final String? basePlanIdAndroid;
+  final String? purchaseTokenAndroid;
+  final String? subscriptionGroupIdIOS;
+  final String? originalTransactionId;
+  final SubscriptionRenewal? renewal;
+
+  /// 离线回退的证据；evaluatedAtMs 保持原始查询时间。
+  final bool fromCache;
 
   /// 当前权益状态。
   final SubscriptionAccessStatus status;
@@ -69,6 +88,12 @@ class SubscriptionAccessState {
   /// 将权益快照编码为可持久化的 JSON 对象。
   Map<String, dynamic> toJson() {
     return {
+      'store': store.name,
+      'basePlanIdAndroid': basePlanIdAndroid,
+      'purchaseTokenAndroid': purchaseTokenAndroid,
+      'subscriptionGroupIdIOS': subscriptionGroupIdIOS,
+      'originalTransactionId': originalTransactionId,
+      'renewal': renewal?.toJson(),
       'status': status.name,
       'evaluatedAtMs': evaluatedAtMs,
       'effectiveUntilMs': effectiveUntilMs,
@@ -83,6 +108,16 @@ class SubscriptionAccessState {
   factory SubscriptionAccessState.fromJson(Map<dynamic, dynamic> json) {
     final String statusValue = json['status']?.toString() ?? '';
     return SubscriptionAccessState(
+      store:
+          IapStore.values.where((s) => s.name == json['store']).firstOrNull ??
+          IapStore.Unknown,
+      basePlanIdAndroid: json['basePlanIdAndroid'] as String?,
+      purchaseTokenAndroid: json['purchaseTokenAndroid'] as String?,
+      subscriptionGroupIdIOS: json['subscriptionGroupIdIOS'] as String?,
+      originalTransactionId: json['originalTransactionId'] as String?,
+      renewal: json['renewal'] is Map
+          ? SubscriptionRenewal.fromJson(json['renewal'] as Map)
+          : null,
       status: SubscriptionAccessStatus.values.firstWhere(
         (value) => value.name == statusValue,
         orElse: () => SubscriptionAccessStatus.unavailable,
@@ -100,6 +135,8 @@ class SubscriptionAccessState {
 
   /// 复制当前快照并替换指定字段。
   SubscriptionAccessState copyWith({
+    String? subscriptionGroupIdIOS,
+    bool? fromCache,
     SubscriptionAccessStatus? status,
     int? evaluatedAtMs,
     int? effectiveUntilMs,
@@ -109,6 +146,14 @@ class SubscriptionAccessState {
     SubscriptionAccessReason? reason,
   }) {
     return SubscriptionAccessState(
+      store: store,
+      basePlanIdAndroid: basePlanIdAndroid,
+      purchaseTokenAndroid: purchaseTokenAndroid,
+      subscriptionGroupIdIOS:
+          subscriptionGroupIdIOS ?? this.subscriptionGroupIdIOS,
+      originalTransactionId: originalTransactionId,
+      renewal: renewal,
+      fromCache: fromCache ?? this.fromCache,
       status: status ?? this.status,
       evaluatedAtMs: evaluatedAtMs ?? this.evaluatedAtMs,
       effectiveUntilMs: effectiveUntilMs ?? this.effectiveUntilMs,
@@ -118,4 +163,34 @@ class SubscriptionAccessState {
       reason: reason ?? this.reason,
     );
   }
+}
+
+/// 商店已确认的续订设置，不作为当前权益授权依据。
+class SubscriptionRenewal {
+  const SubscriptionRenewal({
+    required this.autoRenewEnabled,
+    this.nextProductId,
+    this.expectedRenewalAtMs,
+    this.nextBasePlanIdAndroid,
+  });
+
+  final bool autoRenewEnabled;
+  final String? nextProductId;
+  final int? expectedRenewalAtMs;
+  final String? nextBasePlanIdAndroid;
+
+  Map<String, dynamic> toJson() => {
+    'autoRenewEnabled': autoRenewEnabled,
+    'nextProductId': nextProductId,
+    'expectedRenewalAtMs': expectedRenewalAtMs,
+    'nextBasePlanIdAndroid': nextBasePlanIdAndroid,
+  };
+
+  factory SubscriptionRenewal.fromJson(Map<dynamic, dynamic> json) =>
+      SubscriptionRenewal(
+        autoRenewEnabled: json['autoRenewEnabled'] as bool,
+        nextBasePlanIdAndroid: json['nextBasePlanIdAndroid'] as String?,
+        nextProductId: json['nextProductId'] as String?,
+        expectedRenewalAtMs: (json['expectedRenewalAtMs'] as num?)?.toInt(),
+      );
 }

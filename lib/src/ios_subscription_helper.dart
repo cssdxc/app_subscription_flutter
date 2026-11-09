@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'app_store_trial.dart';
@@ -18,31 +20,9 @@ enum StoreKitSubscriptionState {
       .firstWhere((state) => state.name == value.trim(), orElse: () => unknown);
 }
 
-/// 提供 App Store 订阅状态映射、权益选择和试用资格判断。
+/// 提供 App Store 订阅状态关联、权益映射和试用资格判断。
 class IosSubscriptionHelper {
   const IosSubscriptionHelper._();
-
-  /// 从多个权益状态中选择最应授予用户的状态。
-  static SubscriptionAccessState selectMostRelevantAccessState(
-    Iterable<SubscriptionAccessState> states,
-  ) {
-    final List<SubscriptionAccessState> resolvedStates = states.toList(
-      growable: false,
-    );
-    if (resolvedStates.isEmpty) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.unavailable,
-        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
-        note: 'no subscription access states',
-      );
-    }
-
-    SubscriptionAccessState bestState = resolvedStates.first;
-    for (final SubscriptionAccessState candidate in resolvedStates.skip(1)) {
-      bestState = _preferAccessState(bestState, candidate);
-    }
-    return bestState;
-  }
 
   /// 将 Apple StoreKit 2 返回的订阅状态映射为统一权益状态。
   ///
@@ -54,129 +34,173 @@ class IosSubscriptionHelper {
     required String fallbackProductId,
     DateTime? now,
   }) {
-    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    final normalizedState = StoreKitSubscriptionState.fromNative(status.state);
-    final String productId = verifiedEntitlement?.productId.isNotEmpty == true
-        ? verifiedEntitlement!.productId
-        : fallbackProductId;
-    final String transactionId = verifiedEntitlement?.transactionId ?? '';
-
-    switch (normalizedState) {
-      case StoreKitSubscriptionState.subscribed:
-        if (verifiedEntitlement == null) {
-          return SubscriptionAccessState(
-            status: SubscriptionAccessStatus.unavailable,
-            evaluatedAtMs: nowMs,
-            productId: productId,
-            note: 'subscribed status has no verified current entitlement',
-          );
-        }
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.active,
-          evaluatedAtMs: nowMs,
-          effectiveUntilMs: verifiedEntitlement.expirationDateIOS?.toInt(),
-          productId: productId,
-          transactionId: transactionId,
-          note: 'StoreKit subscription state: subscribed',
-        );
-      case StoreKitSubscriptionState.inGracePeriod:
-        if (verifiedEntitlement == null) {
-          return SubscriptionAccessState(
-            status: SubscriptionAccessStatus.unavailable,
-            evaluatedAtMs: nowMs,
-            productId: productId,
-            note: 'grace period status has no verified current entitlement',
-          );
-        }
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.gracePeriod,
-          evaluatedAtMs: nowMs,
-          effectiveUntilMs:
-              status.renewalInfo?.gracePeriodExpirationDate?.toInt() ??
-              verifiedEntitlement.renewalInfoIOS?.gracePeriodExpirationDate
-                  ?.toInt(),
-          productId: productId,
-          transactionId: transactionId,
-          note: 'StoreKit subscription state: inGracePeriod',
-        );
-      case StoreKitSubscriptionState.inBillingRetryPeriod:
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.billingRetry,
-          evaluatedAtMs: nowMs,
-          productId: productId,
-          transactionId: transactionId,
-          note: 'StoreKit subscription state: inBillingRetryPeriod',
-        );
-      case StoreKitSubscriptionState.expired:
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.expired,
-          evaluatedAtMs: nowMs,
-          productId: productId,
-          transactionId: transactionId,
-          note: 'StoreKit subscription state: expired',
-        );
-      case StoreKitSubscriptionState.revoked:
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.revoked,
-          evaluatedAtMs: nowMs,
-          productId: productId,
-          transactionId: transactionId,
-          note: 'StoreKit subscription state: revoked',
-        );
-      case StoreKitSubscriptionState.unknown:
-        final SubscriptionAccessState? entitlementState =
-            _resolveAccessStateFromEntitlement(
-              entitlement: verifiedEntitlement,
-              fallbackProductId: productId,
-              now: now,
-            );
-        if (entitlementState != null) {
-          return entitlementState.copyWith(
-            note:
-                'StoreKit state unavailable; used verified entitlement fields',
-          );
-        }
-        return SubscriptionAccessState(
-          status: SubscriptionAccessStatus.unavailable,
-          evaluatedAtMs: nowMs,
-          productId: productId,
-          transactionId: transactionId,
-          note: 'unknown StoreKit subscription state: ${status.state}',
-        );
-    }
+    final state = StoreKitSubscriptionState.fromNative(status.state);
+    final entitlement = verifiedEntitlement;
+    final accessStatus = switch (state) {
+      StoreKitSubscriptionState.subscribed => SubscriptionAccessStatus.active,
+      StoreKitSubscriptionState.inGracePeriod =>
+        SubscriptionAccessStatus.gracePeriod,
+      StoreKitSubscriptionState.inBillingRetryPeriod =>
+        SubscriptionAccessStatus.billingRetry,
+      StoreKitSubscriptionState.expired => SubscriptionAccessStatus.expired,
+      StoreKitSubscriptionState.revoked => SubscriptionAccessStatus.revoked,
+      StoreKitSubscriptionState.unknown =>
+        entitlement?.isActive == true
+            ? SubscriptionAccessStatus.active
+            : SubscriptionAccessStatus.unavailable,
+    };
+    final needsEntitlement =
+        accessStatus == SubscriptionAccessStatus.active ||
+        accessStatus == SubscriptionAccessStatus.gracePeriod;
+    final renewal = status.renewalInfo;
+    final identity = _renewalIdentity(renewal?.jsonRepresentation);
+    return SubscriptionAccessState(
+      store: IapStore.Apple,
+      status: needsEntitlement && entitlement == null
+          ? SubscriptionAccessStatus.unavailable
+          : accessStatus,
+      evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+      productId:
+          entitlement?.productId ?? identity?.productId ?? fallbackProductId,
+      transactionId: entitlement?.transactionId ?? '',
+      originalTransactionId:
+          _transactionOriginalId(entitlement) ?? identity?.originalId,
+      effectiveUntilMs: state == StoreKitSubscriptionState.inGracePeriod
+          ? renewal?.gracePeriodExpirationDate?.toInt()
+          : entitlement?.expirationDateIOS?.toInt(),
+      renewal: renewal == null
+          ? null
+          : SubscriptionRenewal(
+              autoRenewEnabled: renewal.willAutoRenew,
+              nextProductId: renewal.willAutoRenew
+                  ? renewal.autoRenewPreference
+                  : null,
+              expectedRenewalAtMs: renewal.renewalDate?.toInt(),
+            ),
+      note: 'StoreKit state: ${status.state}',
+    );
   }
 
-  /// 归并同一订阅组内 StoreKit 返回的全部状态。
-  static SubscriptionAccessState resolveAccessStateFromSubscriptionStatuses(
+  /// 状态只能与其对应的已验证当前交易匹配，不能按组取最新一笔。
+  static List<SubscriptionAccessState>
+  resolveAccessStateFromSubscriptionStatuses(
     List<SubscriptionStatusIOS> statuses, {
     required List<ActiveSubscription> verifiedEntitlements,
     required String fallbackProductId,
     DateTime? now,
   }) {
-    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    if (statuses.isEmpty) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.expired,
-        evaluatedAtMs: nowMs,
-        productId: fallbackProductId,
-        note: 'StoreKit returned no subscription status',
+    if (verifiedEntitlements.isEmpty) {
+      final identified = statuses.where(
+        (status) =>
+            _renewalIdentity(status.renewalInfo?.jsonRepresentation) != null,
       );
-    }
-
-    final ActiveSubscription? verifiedEntitlement = _mostRecentEntitlement(
-      verifiedEntitlements,
-    );
-
-    return selectMostRelevantAccessState(
-      statuses.map(
-        (status) => resolveAccessStateFromSubscriptionStatus(
+      if (identified.isNotEmpty) {
+        return identified
+            .map(
+              (status) => resolveAccessStateFromSubscriptionStatus(
+                status: status,
+                verifiedEntitlement: null,
+                fallbackProductId: fallbackProductId,
+                now: now,
+              ),
+            )
+            .toList(growable: false);
+      }
+      final status = statuses.length == 1
+          ? statuses.single
+          : SubscriptionStatusIOS(state: 'expired');
+      return [
+        resolveAccessStateFromSubscriptionStatus(
           status: status,
-          verifiedEntitlement: verifiedEntitlement,
+          verifiedEntitlement: null,
           fallbackProductId: fallbackProductId,
           now: now,
         ),
-      ),
-    );
+      ];
+    }
+    return verifiedEntitlements
+        .map((entitlement) {
+          final originalId = _transactionOriginalId(entitlement);
+          final matching = statuses.where((status) {
+            // 原生 subscriptionStatusIOS 仅为 verified renewalInfo 提供该 JSON。
+            // productId 是当前商品；autoRenewPreference 是未来目标，不能用它匹配。
+            final identity = _renewalIdentity(
+              status.renewalInfo?.jsonRepresentation,
+            );
+            return identity != null &&
+                identity.productId == entitlement.productId &&
+                (originalId == null || identity.originalId == originalId);
+          }).toList();
+          final status = matching.length == 1
+              ? matching.single
+              : statuses.length == 1 &&
+                    verifiedEntitlements.length == 1 &&
+                    statuses.single.renewalInfo?.jsonRepresentation == null
+              ? statuses.single
+              : null;
+          if (status == null) {
+            return SubscriptionAccessState(
+              store: IapStore.Apple,
+              status: SubscriptionAccessStatus.unavailable,
+              evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
+              productId: entitlement.productId,
+              transactionId: entitlement.transactionId,
+              note:
+                  'StoreKit status cannot be associated with this transaction',
+            );
+          }
+          return resolveAccessStateFromSubscriptionStatus(
+            status: status,
+            verifiedEntitlement: entitlement,
+            fallbackProductId: entitlement.productId,
+            now: now,
+          );
+        })
+        .toList(growable: false);
+  }
+
+  static ({String productId, String? originalId})? _renewalIdentity(
+    String? raw,
+  ) {
+    if (raw == null) return null;
+    try {
+      final json = jsonDecode(raw) as Map;
+      final productId = json['productId'];
+      return productId is String
+          ? (
+              productId: productId,
+              originalId: json['originalTransactionId']?.toString(),
+            )
+          : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String? _transactionOriginalId(ActiveSubscription? entitlement) {
+    return _transactionPayload(
+      entitlement,
+    )?['originalTransactionId']?.toString();
+  }
+
+  /// 此字段来自原生已验证的当前订阅，不依赖商品仍在售。
+  static String? subscriptionGroupId(ActiveSubscription entitlement) =>
+      _transactionPayload(
+        entitlement,
+      )?['subscriptionGroupIdentifier']?.toString();
+
+  static Map? _transactionPayload(ActiveSubscription? entitlement) {
+    // 此 JWS 来自已由 StoreKit 验证的 currentEntitlements；不接受外部未验证 token。
+    try {
+      final payload = entitlement?.purchaseToken?.split('.')[1];
+      if (payload == null) return null;
+      return jsonDecode(
+            utf8.decode(base64Url.decode(base64Url.normalize(payload))),
+          )
+          as Map;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 逐订阅组查询资格。同组只查一次；没有组信息或查询失败均为 unknown。
@@ -210,85 +234,5 @@ class IosSubscriptionHelper {
       result[product.id] = groups[group]!;
     }
     return Map.unmodifiable(result);
-  }
-
-  static SubscriptionAccessState _preferAccessState(
-    SubscriptionAccessState first,
-    SubscriptionAccessState second,
-  ) {
-    if (first.shouldGrantAccess != second.shouldGrantAccess) {
-      return first.shouldGrantAccess ? first : second;
-    }
-
-    final int firstPriority = _accessStatePriority(first.status);
-    final int secondPriority = _accessStatePriority(second.status);
-    if (firstPriority != secondPriority) {
-      return firstPriority < secondPriority ? first : second;
-    }
-
-    final int firstUntil = first.effectiveUntilMs ?? -1;
-    final int secondUntil = second.effectiveUntilMs ?? -1;
-    if (firstUntil != secondUntil) {
-      return firstUntil > secondUntil ? first : second;
-    }
-
-    return first.evaluatedAtMs >= second.evaluatedAtMs ? first : second;
-  }
-
-  static int _accessStatePriority(SubscriptionAccessStatus status) {
-    switch (status) {
-      case SubscriptionAccessStatus.active:
-        return 0;
-      case SubscriptionAccessStatus.gracePeriod:
-        return 1;
-      case SubscriptionAccessStatus.unavailable:
-        return 2;
-      case SubscriptionAccessStatus.revoked:
-        return 3;
-      case SubscriptionAccessStatus.billingRetry:
-        return 4;
-      case SubscriptionAccessStatus.suspended:
-        return 5;
-      case SubscriptionAccessStatus.expired:
-        return 6;
-    }
-  }
-
-  static ActiveSubscription? _mostRecentEntitlement(
-    List<ActiveSubscription> entitlements,
-  ) {
-    if (entitlements.isEmpty) {
-      return null;
-    }
-
-    ActiveSubscription mostRecent = entitlements.first;
-    for (final ActiveSubscription entitlement in entitlements.skip(1)) {
-      if (entitlement.transactionDate > mostRecent.transactionDate) {
-        mostRecent = entitlement;
-      }
-    }
-    return mostRecent;
-  }
-
-  static SubscriptionAccessState? _resolveAccessStateFromEntitlement({
-    required ActiveSubscription? entitlement,
-    required String fallbackProductId,
-    DateTime? now,
-  }) {
-    if (entitlement == null || !entitlement.isActive) {
-      return null;
-    }
-
-    // isActive 是 StoreKit 验证的结果；日期只用于展示。
-    return SubscriptionAccessState(
-      status: SubscriptionAccessStatus.active,
-      evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-      effectiveUntilMs: entitlement.expirationDateIOS?.toInt(),
-      productId: entitlement.productId.isNotEmpty
-          ? entitlement.productId
-          : fallbackProductId,
-      transactionId: entitlement.transactionId,
-      note: 'verified entitlement is active',
-    );
   }
 }

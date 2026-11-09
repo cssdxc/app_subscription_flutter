@@ -69,4 +69,6 @@ int failureNumericCode(SubscriptionFailureCode code) => switch (code) {
   SubscriptionFailureCode.localVerificationFailed => 2022,
   SubscriptionFailureCode.missingLicenseKey => 2023,
   SubscriptionFailureCode.missingPurchaseToken => 2024,
+  SubscriptionFailureCode.invalidReplacement => 2025,
+  SubscriptionFailureCode.verificationRequired => 2026,
 };

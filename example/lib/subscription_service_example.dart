@@ -23,14 +23,16 @@ const examplePlans = <ExamplePlan, SubscriptionPlan>{
   ),
 };
 
-/// 宿主只装配配置和业务回调，无须重复转发通知器或自己维护购买 loading。
+/// plans 只列当前在售商品；默认识别全部订阅，单一权益直接读取 accessState.value.shouldGrantAccess。
 SubscriptionCoordinator createExampleSubscription({
   required String googlePlayLicenseKey,
+  VerifiedSubscriptionQuery? verifiedSubscriptionQuery,
   SubscriptionTransactionReporter? transactionReporter,
 }) => SubscriptionCoordinator(
   config: SubscriptionCoordinatorConfig(
     plans: examplePlans.values.toList(),
     googlePlayLicenseKeyAndroid: googlePlayLicenseKey,
+    verifiedSubscriptionQuery: verifiedSubscriptionQuery,
     transactionReporter: transactionReporter,
   ),
 );

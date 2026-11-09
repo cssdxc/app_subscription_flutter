@@ -8,7 +8,8 @@ export 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart'
         SubscriptionOffer,
         ErrorCode,
         SubscriptionPeriod,
-        SubscriptionPeriodUnit;
+        SubscriptionPeriodUnit,
+        SubscriptionReplacementModeAndroid;
 
 export 'src/subscription_access_state.dart';
 export 'src/subscription_action_result.dart';
@@ -23,3 +24,5 @@ export 'src/subscription_operation_state.dart'
     show SubscriptionOperation, SubscriptionOperationState;
 
 export 'src/subscription_configuration.dart';
+
+export 'src/subscription_snapshot.dart';

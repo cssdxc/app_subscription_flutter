@@ -5,100 +5,9 @@ import 'package:app_subscription_core/app_subscription_core.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:platform/platform.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const channel = MethodChannel('flutter_inapp');
-const monthly = SubscriptionPlan(appStoreProductId: 'monthly');
-const yearly = SubscriptionPlan(appStoreProductId: 'yearly');
-
-ActiveSubscription entitlement(String id) => ActiveSubscription(
-  productId: id,
-  isActive: true,
-  transactionDate: 1,
-  transactionId: 'active-$id',
-);
-
-PurchaseIOS purchase(String id) => PurchaseIOS(
-  id: 'purchase-$id',
-  transactionId: 'purchase-$id',
-  originalTransactionIdentifierIOS: 'original-$id',
-  productId: id,
-  isAutoRenewing: true,
-  purchaseState: PurchaseState.Purchased,
-  quantity: 1,
-  store: IapStore.Apple,
-  storeId: StoreIds.apple,
-  transactionDate: 1,
-);
-
-ProductSubscriptionIOS product(String id, {String group = 'group'}) =>
-    ProductSubscriptionIOS(
-      id: id,
-      currency: 'USD',
-      description: '',
-      title: '',
-      displayNameIOS: '',
-      displayPrice: r'$12.00',
-      price: 12,
-      introductoryPricePaymentModeIOS: PaymentModeIOS.FreeTrial,
-      subscriptionGroupIdIOS: group,
-      isFamilyShareableIOS: false,
-      jsonRepresentationIOS: '{}',
-      typeIOS: ProductTypeIOS.AutoRenewableSubscription,
-    );
-
-void mockStore({
-  List<PurchaseIOS> purchases = const [],
-  List<ProductSubscriptionIOS> products = const [],
-  Future<Object?> Function(MethodCall)? onCall,
-}) {
-  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-      .setMockMethodCallHandler(channel, (call) async {
-        if (onCall != null) {
-          final value = await onCall(call);
-          if (value != null) return value;
-        }
-        switch (call.method) {
-          case 'initConnection':
-          case 'restorePurchases':
-          case 'endConnection':
-          case 'isTransactionVerifiedIOS':
-          case 'isEligibleForIntroOfferIOS':
-            return true;
-          case 'fetchProducts':
-            return products.map((item) => item.toJson()).toList();
-          case 'getAvailableItems':
-            return purchases.map((item) => item.toJson()).toList();
-        }
-        return null;
-      });
-}
-
-SubscriptionCoordinator create({
-  List<SubscriptionPlan> plans = const [monthly],
-  required ActiveSubscriptionQuery query,
-  required SubscriptionStatusQueryIOS statuses,
-  SubscriptionTransactionReporter? report,
-  SubscriptionActionObserver? observe,
-  SubscriptionLogger? logger,
-}) {
-  final coordinator = SubscriptionCoordinator(
-    iap: FlutterInappPurchase(
-      platform: FakePlatform(operatingSystem: Platform.iOS),
-    ),
-    config: SubscriptionCoordinatorConfig(
-      plans: plans,
-      activeSubscriptionQuery: query,
-      subscriptionStatusQueryIOS: statuses,
-      transactionReporter: report,
-      actionObserver: observe,
-      logger: logger,
-    ),
-  );
-  addTearDown(coordinator.dispose);
-  return coordinator;
-}
+import 'support/subscription_store.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -230,18 +139,17 @@ void main() {
           await releaseProducts.future;
         }
         if (call.method == 'requestPurchase') requested.complete();
+        if (call.method == 'isTransactionVerifiedIOS' &&
+            (call.arguments as Map)['sku'] == 'yearly') {
+          verifyingEarlier.complete();
+          await releaseEarlier.future;
+        }
         return null;
       },
     );
     final coordinator = create(
       plans: const [monthly, yearly],
-      query: (ids) async {
-        if (ids?.length == 1 && ids?.single == 'yearly') {
-          verifyingEarlier.complete();
-          await releaseEarlier.future;
-        }
-        return (ids ?? []).map(entitlement).toList();
-      },
+      query: (ids) async => (ids ?? []).map(entitlement).toList(),
       statuses: (_) async => [SubscriptionStatusIOS(state: 'subscribed')],
       observe: (event) {
         if (event.productId == 'monthly' &&
@@ -288,7 +196,7 @@ void main() {
     expect((await buying).cancelled, true);
   });
 
-  test('单笔权益查询异常保留商店错误，不归类为验证失败', () async {
+  test('Apple 已验证交易完成不依赖当前权益查询，离线不刷新授权证据', () async {
     var failQuery = false;
     mockStore(purchases: [purchase('monthly')]);
     final coordinator = create(
@@ -302,11 +210,14 @@ void main() {
     await coordinator.init();
     failQuery = true;
     final result = await coordinator.restore();
-    expect(result.storeErrorCode, ErrorCode.NetworkError);
-    expect(result.failureCode, isNull);
+    expect(result.failureCode, SubscriptionFailureCode.restoreInactive);
+    expect(
+      coordinator.accessState.value.activeSubscriptions.single.fromCache,
+      true,
+    );
   });
 
-  test('已移出配置的商品缓存不能在离线时授予权益', () async {
+  test('显式识别范围之外的商品缓存不能在离线时授予权益', () async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       'subscription_access_state',
@@ -319,6 +230,7 @@ void main() {
       ),
     );
     final coordinator = create(
+      subscriptionProductIds: ['monthly'],
       query: (_) async => throw StateError('商店离线'),
       statuses: (_) async => [],
     );
@@ -463,8 +375,11 @@ void main() {
     );
     await coordinator.init();
     expect(coordinator.accessState.value.shouldGrantAccess, true);
-    expect(coordinator.accessState.value.productId, 'yearly');
-    final published = <SubscriptionAccessState>[];
+    expect(
+      coordinator.accessState.value.activeSubscriptions.single.productId,
+      'yearly',
+    );
+    final published = <SubscriptionSnapshot>[];
     coordinator.accessState.addListener(
       () => published.add(coordinator.accessState.value),
     );
@@ -481,14 +396,19 @@ void main() {
         );
     await synced.future;
     expect(
-      coordinator.accessState.value.status,
+      coordinator.accessState.value.activeSubscriptions.single.status,
       SubscriptionAccessStatus.active,
     );
-    expect(coordinator.accessState.value.productId, 'yearly');
+    expect(
+      coordinator.accessState.value.activeSubscriptions.single.productId,
+      'yearly',
+    );
     expect(published, isNotEmpty);
     expect(
       published.every(
-        (state) => state.shouldGrantAccess && state.productId == 'yearly',
+        (state) =>
+            state.shouldGrantAccess &&
+            state.activeSubscriptions.single.productId == 'yearly',
       ),
       true,
     );
@@ -515,7 +435,7 @@ void main() {
     await coordinator.init();
     expect(coordinator.accessState.value.shouldGrantAccess, true);
     final state = await coordinator.refreshAccessState();
-    expect(state.status, SubscriptionAccessStatus.active);
+    expect(state.subscriptions.single.status, SubscriptionAccessStatus.active);
     expect(prefs.getString('subscription_access_state'), originalCache);
   });
 
@@ -571,7 +491,7 @@ void main() {
     expect(coordinator.activity.value.isLoading, false);
   });
 
-  test('交易签名通过不等于订阅有效，缺少 StoreKit 当前权益时不完成交易', () async {
+  test('Apple 已验证历史交易仍完成，但不授予当前权益', () async {
     var finishes = 0;
     var reports = 0;
     mockStore(
@@ -594,10 +514,10 @@ void main() {
       },
     );
     final result = await coordinator.restore();
-    expect(result.failureCode, SubscriptionFailureCode.subscriptionInactive);
+    expect(result.failureCode, SubscriptionFailureCode.restoreInactive);
     expect(coordinator.accessState.value.shouldGrantAccess, false);
-    expect(finishes, 0);
-    expect(reports, 0);
+    expect(finishes, 1);
+    expect(reports, 1);
   });
 
   test('批量恢复仅在批次末重新查询一次试用资格', () async {
@@ -613,7 +533,16 @@ void main() {
     final coordinator = create(
       plans: const [monthly, yearly],
       query: (_) async => [entitlement('monthly'), entitlement('yearly')],
-      statuses: (_) async => [SubscriptionStatusIOS(state: 'subscribed')],
+      statuses: (_) async => [
+        for (final id in ['monthly', 'yearly'])
+          SubscriptionStatusIOS(
+            state: 'subscribed',
+            renewalInfo: RenewalInfoIOS(
+              willAutoRenew: true,
+              jsonRepresentation: jsonEncode({'productId': id}),
+            ),
+          ),
+      ],
     );
     await coordinator.init();
     eligibilityQueries = 0;
@@ -643,8 +572,14 @@ void main() {
     );
     final state = await coordinator.refreshAccessState();
     expect(state.shouldGrantAccess, false);
-    expect(state.status, SubscriptionAccessStatus.unavailable);
-    expect(state.reason, SubscriptionAccessReason.storeQueryFailed);
+    expect(
+      state.subscriptions.single.status,
+      SubscriptionAccessStatus.unavailable,
+    );
+    expect(
+      state.subscriptions.single.reason,
+      SubscriptionAccessReason.storeQueryFailed,
+    );
   });
 
   test('单笔验证期间释放协调器，不再完成商店交易或启动订单记录', () async {
@@ -731,7 +666,7 @@ void main() {
     releaseOldQuery.complete();
     await oldRefresh;
     await synced.future;
-    expect(queries, 4);
+    expect(queries, 3);
     expect(coordinator.accessState.value.shouldGrantAccess, true);
   });
 
@@ -764,10 +699,19 @@ void main() {
       final shouldUseCache = cachedProductId == 'monthly';
       expect(coordinator.accessState.value.shouldGrantAccess, shouldUseCache);
       if (shouldUseCache) {
-        expect(prefs.getString('subscription_access_state'), cached);
+        final stored = SubscriptionSnapshot.fromJson(
+          jsonDecode(prefs.getString('subscription_access_state')!) as Map,
+        );
+        final old = SubscriptionAccessState.fromJson(jsonDecode(cached) as Map);
+        expect(
+          stored.activeSubscriptions.single.evaluatedAtMs,
+          old.evaluatedAtMs,
+        );
       } else {
         expect(
-          coordinator.accessState.value.reason,
+          coordinator.accessState.value.subscriptions
+              .firstWhere((s) => s.productId == 'monthly')
+              .reason,
           SubscriptionAccessReason.storeQueryFailed,
         );
       }
@@ -792,7 +736,10 @@ void main() {
     );
     await coordinator.init();
     expect(coordinator.accessState.value.shouldGrantAccess, true);
-    expect(coordinator.accessState.value.productId, 'yearly');
+    expect(
+      coordinator.accessState.value.activeSubscriptions.single.productId,
+      'yearly',
+    );
     expect(prefs.getString('subscription_access_state'), cached);
   });
 }

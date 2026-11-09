@@ -97,8 +97,12 @@ ActiveSubscription _activeSubscription() {
 }
 
 Future<SubscriptionCoordinator> _androidCoordinator({
+  List<SubscriptionPlan>? plans,
+  List<String>? subscriptionProductIds,
   SubscriptionActionObserver? actionObserver,
   ActiveSubscriptionQuery? query,
+  VerifiedSubscriptionQuery? verifiedQuery,
+  Duration purchaseTimeout = const Duration(seconds: 2),
 }) async {
   SharedPreferences.setMockInitialValues(<String, Object>{});
   final SharedPreferences preferences = await SharedPreferences.getInstance();
@@ -110,20 +114,45 @@ Future<SubscriptionCoordinator> _androidCoordinator({
     iap: iap,
     storeAdapter: const GooglePlaySubscriptionAdapter(licenseKey: _licenseKey),
     config: SubscriptionCoordinatorConfig(
-      plans: const <SubscriptionPlan>[
-        SubscriptionPlan(
-          googlePlay: GooglePlayPlan(
-            basePlanId: 'monthly',
-            productId: 'subscribe_month_1',
-          ),
-          fallbackPrice: r'$9.99',
-        ),
-      ],
+      plans:
+          plans ??
+          const <SubscriptionPlan>[
+            SubscriptionPlan(
+              googlePlay: GooglePlayPlan(
+                basePlanId: 'monthly',
+                productId: 'subscribe_month_1',
+              ),
+              fallbackPrice: r'$9.99',
+            ),
+          ],
+      subscriptionProductIds: subscriptionProductIds,
       activeSubscriptionQuery:
           query ?? (_) async => <ActiveSubscription>[_activeSubscription()],
       actionObserver: actionObserver,
+      verifiedSubscriptionQuery: verifiedQuery,
+      purchaseTimeout: purchaseTimeout,
       googlePlayLicenseKeyAndroid: _licenseKey,
     ),
+  );
+}
+
+void _mockAndroidStore({Future<Object?> Function(MethodCall)? onCall}) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_iapChannel, (call) async {
+        final result = await onCall?.call(call);
+        if (result != null) return result;
+        return switch (call.method) {
+          'initConnection' || 'endConnection' => true,
+          'fetchProducts' => [
+            _product([_offer(id: 'monthly', token: 'offer')]).toJson(),
+          ],
+          'getAvailableItems' => [_purchase().toJson()],
+          _ => null,
+        };
+      });
+  addTearDown(
+    () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, null),
   );
 }
 
@@ -134,13 +163,381 @@ void main() {
 
   test('grants access only for active Google Play subscriptions', () {
     final SubscriptionAccessState state =
-        AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-          <ActiveSubscription>[_activeSubscription()],
-          fallbackProductId: 'subscribe_month_1',
+        AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
+          subscription: _activeSubscription(),
         );
 
     expect(state.status, SubscriptionAccessStatus.active);
     expect(state.shouldGrantAccess, isTrue);
+  });
+
+  test('Google 默认查询全部订阅，未在售历史商品可恢复且无需 base plan 身份', () async {
+    var acknowledgements = 0;
+    _mockAndroidStore(
+      onCall: (call) async {
+        if (call.method == 'acknowledgePurchaseAndroid') {
+          acknowledgements++;
+          return true;
+        }
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      plans: const [
+        SubscriptionPlan(
+          googlePlay: GooglePlayPlan(
+            productId: 'current',
+            basePlanId: 'annual',
+          ),
+        ),
+      ],
+      query: (ids) async {
+        expect(ids, isNull);
+        return [_activeSubscription()];
+      },
+    );
+    addTearDown(coordinator.dispose);
+    final result = await coordinator.restore();
+    expect(result.success, true);
+    expect(result.restoredCount, 1);
+    expect(acknowledgements, 1);
+    final record = coordinator.accessState.value.activeSubscriptions.single;
+    expect(record.productId, 'subscribe_month_1');
+    expect(record.basePlanIdAndroid, isNull);
+    expect(coordinator.productIds, ['current']);
+  });
+
+  test('Google 全量查询排除普通内购，不因购买签名有效而确认非订阅', () async {
+    var acknowledgements = 0;
+    _mockAndroidStore(
+      onCall: (call) async {
+        if (call.method == 'acknowledgePurchaseAndroid') {
+          acknowledgements++;
+          return true;
+        }
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      plans: const [
+        SubscriptionPlan(
+          googlePlay: GooglePlayPlan(
+            productId: 'current',
+            basePlanId: 'annual',
+          ),
+        ),
+      ],
+      query: (_) async => [],
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.restore();
+    expect(coordinator.accessState.value.subscriptions, isEmpty);
+    expect(coordinator.accessState.value.shouldGrantAccess, false);
+    expect(acknowledgements, 0);
+  });
+
+  test('Google 显式范围排除历史订阅及其恢复确认', () async {
+    var acknowledgements = 0;
+    _mockAndroidStore(
+      onCall: (call) async {
+        if (call.method == 'acknowledgePurchaseAndroid') acknowledgements++;
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      subscriptionProductIds: ['current'],
+      query: (ids) async {
+        expect(ids, ['current']);
+        return [_activeSubscription()];
+      },
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.restore();
+    expect(coordinator.accessState.value.shouldGrantAccess, false);
+    expect(acknowledgements, 0);
+  });
+
+  test('客户端商品目录的 base plan 不作为已购套餐身份', () {
+    final record =
+        AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
+          subscription: _activeSubscription(),
+        );
+    expect(record.basePlanIdAndroid, isNull);
+    expect(record.purchaseTokenAndroid, 'purchase-token-1');
+  });
+
+  for (final verification in ['verified', 'wrongToken', 'queryFailed']) {
+    test('Google 新购买先验证令牌权益再确认：$verification', () async {
+      final requested = Completer<void>();
+      var acknowledgements = 0;
+      var verifiedBeforeAck = false;
+      _mockAndroidStore(
+        onCall: (call) async {
+          if (call.method == 'requestPurchase') requested.complete();
+          if (call.method == 'acknowledgePurchaseAndroid') {
+            expect(verifiedBeforeAck, true);
+            acknowledgements++;
+            return true;
+          }
+          return null;
+        },
+      );
+      final coordinator = await _androidCoordinator(
+        verifiedQuery: (request) async {
+          if (request.purchase != null) {
+            expect(request.purchase?.purchaseToken, 'purchase-token-1');
+            expect(acknowledgements, 0);
+            verifiedBeforeAck = true;
+          }
+          final now = DateTime.now().millisecondsSinceEpoch;
+          return SubscriptionSnapshot(
+            evaluatedAtMs: now,
+            queryFailedProductIds: verification == 'queryFailed'
+                ? ['subscribe_month_1']
+                : [],
+            subscriptions: [
+              SubscriptionAccessState(
+                store: IapStore.Google,
+                productId: 'subscribe_month_1',
+                basePlanIdAndroid: 'monthly',
+                purchaseTokenAndroid: verification == 'wrongToken'
+                    ? 'other'
+                    : 'purchase-token-1',
+                status: SubscriptionAccessStatus.active,
+                evaluatedAtMs: now,
+              ),
+            ],
+          );
+        },
+      );
+      addTearDown(coordinator.dispose);
+      final buying = coordinator.purchasePlan(
+        coordinator.config.plans.single,
+        source: 'test',
+      );
+      await requested.future;
+      await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .handlePlatformMessage(
+            _iapChannel.name,
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('purchase-updated', jsonEncode(_purchase().toJson())),
+            ),
+            null,
+          );
+      final result = await buying;
+      if (verification == 'verified') {
+        expect(result.effect, SubscriptionPurchaseEffect.applied);
+        expect(acknowledgements, 1);
+      } else {
+        expect(
+          result.failureCode,
+          verification == 'wrongToken'
+              ? SubscriptionFailureCode.subscriptionInactive
+              : SubscriptionFailureCode.storeQueryFailed,
+        );
+        expect(acknowledgements, 0);
+        if (verification == 'queryFailed') {
+          expect(coordinator.accessState.value.shouldGrantAccess, false);
+        }
+      }
+    });
+  }
+
+  test('Google 替换传递官方旧 token、商品与模式，不配置业务等级', () async {
+    Object? requested;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (call) async {
+          if (call.method == 'initConnection') return true;
+          if (call.method == 'requestPurchase') requested = call.arguments;
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null),
+    );
+    final iap = FlutterInappPurchase(
+      platform: FakePlatform(operatingSystem: Platform.android),
+    );
+    await iap.initConnection();
+    final offer = _offer(id: 'monthly', token: 'selected-offer');
+    await const GooglePlaySubscriptionAdapter().requestPurchase(
+      iap: iap,
+      product: _product([offer]),
+      offer: offer,
+      options: const SubscriptionPurchaseOptions(
+        replacementAndroid: GooglePlayReplacement(
+          purchaseToken: 'old-token',
+          oldProductId: 'old-product',
+          mode: SubscriptionReplacementModeAndroid.Deferred,
+        ),
+      ),
+    );
+    final payload = requested as Map;
+    expect(payload['purchaseToken'], 'old-token');
+    expect(payload['subscriptionProductReplacementParams'], {
+      'oldProductId': 'old-product',
+      'replacementMode': 'deferred',
+    });
+    expect(
+      (payload['subscriptionOffers'] as List).single['offerToken'],
+      'selected-offer',
+    );
+  });
+
+  test('Google 套餐替换缺少权威 line item 验证时不发起购买', () async {
+    var requests = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              return [
+                _product([_offer(id: 'monthly', token: 'offer')]).toJson(),
+              ];
+            case 'getAvailableItems':
+              return [_purchase().toJson()];
+            case 'requestPurchase':
+              requests++;
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null),
+    );
+    final coordinator = await _androidCoordinator();
+    addTearDown(coordinator.dispose);
+    final result = await coordinator.purchasePlan(
+      coordinator.config.plans.single,
+      source: 'change',
+      options: const SubscriptionPurchaseOptions(
+        replacementAndroid: GooglePlayReplacement(
+          purchaseToken: 'purchase-token-1',
+          oldProductId: 'subscribe_month_1',
+          mode: SubscriptionReplacementModeAndroid.Deferred,
+        ),
+      ),
+    );
+    expect(result.failureCode, SubscriptionFailureCode.verificationRequired);
+    expect(requests, 0);
+  });
+
+  test('Google 旧购买验证等待超时后不再启动付款', () async {
+    final restoring = Completer<void>();
+    final oldPurchase = Completer<Object?>();
+    var requests = 0;
+    _mockAndroidStore(
+      onCall: (call) async {
+        if (call.method == 'getAvailableItems') {
+          restoring.complete();
+          return oldPurchase.future;
+        }
+        if (call.method == 'requestPurchase') requests++;
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      verifiedQuery: (_) async => SubscriptionSnapshot(
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+      purchaseTimeout: const Duration(milliseconds: 30),
+    );
+    addTearDown(coordinator.dispose);
+    final buying = coordinator.purchasePlan(
+      coordinator.config.plans.single,
+      source: 'change',
+      options: const SubscriptionPurchaseOptions(
+        replacementAndroid: GooglePlayReplacement(
+          purchaseToken: 'purchase-token-1',
+          oldProductId: 'subscribe_month_1',
+          mode: SubscriptionReplacementModeAndroid.Deferred,
+        ),
+      ),
+    );
+    await restoring.future;
+    expect((await buying).outcome, SubscriptionActionOutcome.unconfirmed);
+    oldPurchase.complete([_purchase().toJson()]);
+    await pumpEventQueue();
+    expect(requests, 0);
+  });
+
+  test('Google 延后切换以服务端当前和未来 line item 为准', () async {
+    var changed = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_iapChannel, (call) async {
+          switch (call.method) {
+            case 'initConnection':
+            case 'endConnection':
+              return true;
+            case 'fetchProducts':
+              return [
+                _product([_offer(id: 'monthly', token: 'offer')]).toJson(),
+              ];
+            case 'getAvailableItems':
+              return [_purchase().toJson()];
+            case 'requestPurchase':
+              changed = true;
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_iapChannel, null),
+    );
+    final coordinator = await _androidCoordinator(
+      verifiedQuery: (request) async => SubscriptionSnapshot(
+        evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        subscriptions: [
+          SubscriptionAccessState(
+            store: IapStore.Google,
+            productId: 'subscribe_month_1',
+            purchaseTokenAndroid: 'purchase-token-1',
+            basePlanIdAndroid: 'legacy',
+            status: SubscriptionAccessStatus.active,
+            evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+            renewal: SubscriptionRenewal(
+              autoRenewEnabled: true,
+              nextProductId: changed ? 'subscribe_month_1' : null,
+              nextBasePlanIdAndroid: changed ? 'monthly' : null,
+            ),
+          ),
+        ],
+      ),
+    );
+    addTearDown(coordinator.dispose);
+    final result = await coordinator.purchasePlan(
+      coordinator.config.plans.single,
+      source: 'change',
+      options: const SubscriptionPurchaseOptions(
+        replacementAndroid: GooglePlayReplacement(
+          purchaseToken: 'purchase-token-1',
+          oldProductId: 'subscribe_month_1',
+          mode: SubscriptionReplacementModeAndroid.Deferred,
+        ),
+      ),
+    );
+    expect(result.effect, SubscriptionPurchaseEffect.scheduled);
+    expect(
+      coordinator
+          .accessState
+          .value
+          .activeSubscriptions
+          .single
+          .basePlanIdAndroid,
+      'legacy',
+    );
+    expect(
+      coordinator
+          .accessState
+          .value
+          .activeSubscriptions
+          .single
+          .renewal
+          ?.nextBasePlanIdAndroid,
+      'monthly',
+    );
   });
 
   test('暂停订阅属于平台交易限制，普通购买不受此限制', () {
@@ -324,7 +721,7 @@ void main() {
         SubscriptionFailureCode.localVerificationFailed,
       );
       expect(
-        coordinator.accessState.value.status,
+        coordinator.accessState.value.subscriptions.single.status,
         SubscriptionAccessStatus.unavailable,
       );
       expect(acknowledgementCalls, 0);
@@ -607,7 +1004,7 @@ void main() {
     expect(result.success, isTrue);
     expect(coordinator.accessState.value.shouldGrantAccess, isTrue);
     expect(
-      coordinator.accessState.value.status,
+      coordinator.accessState.value.subscriptions.single.status,
       SubscriptionAccessStatus.active,
     );
   });
@@ -641,14 +1038,20 @@ void main() {
     addTearDown(coordinator.dispose);
     await coordinator.init();
     expect(
-      coordinator.accessState.value.status,
+      coordinator.accessState.value.subscriptions.single.status,
       SubscriptionAccessStatus.suspended,
     );
     expect(coordinator.accessState.value.shouldGrantAccess, false);
     invalidSignature = true;
     final state = await coordinator.refreshAccessState();
-    expect(state.status, SubscriptionAccessStatus.unavailable);
-    expect(state.reason, SubscriptionAccessReason.localVerificationFailed);
+    expect(
+      state.subscriptions.single.status,
+      SubscriptionAccessStatus.unavailable,
+    );
+    expect(
+      state.subscriptions.single.reason,
+      SubscriptionAccessReason.localVerificationFailed,
+    );
     expect(state.shouldGrantAccess, false);
   });
 
@@ -712,7 +1115,7 @@ void main() {
     addTearDown(coordinator.dispose);
     await coordinator.init();
     expect(coordinator.accessState.value.shouldGrantAccess, true);
-    final states = <SubscriptionAccessState>[];
+    final states = <SubscriptionSnapshot>[];
     coordinator.accessState.addListener(
       () => states.add(coordinator.accessState.value),
     );
@@ -731,7 +1134,8 @@ void main() {
     expect(
       states.every(
         (state) =>
-            state.shouldGrantAccess && state.productId == 'subscribe_month_1',
+            state.shouldGrantAccess &&
+            state.activeSubscriptions.single.productId == 'subscribe_month_1',
       ),
       true,
     );

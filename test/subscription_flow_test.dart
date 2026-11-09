@@ -333,6 +333,9 @@ void main() {
     expect(result.outcome, SubscriptionActionOutcome.cancelled);
     expect(result.storeErrorCode, ErrorCode.UserCancelled);
     expect(result.failed, isFalse);
+    expect(coordinator.activity.value.showBlockingLoading, isFalse);
+    // 请求返回后的权益查询可独立收尾，不延长购买遮罩。
+    await pumpEventQueue();
     expect(coordinator.activity.value.isLoading, isFalse);
   });
 
@@ -519,6 +522,8 @@ void main() {
     expect(result.outcome, SubscriptionActionOutcome.pending);
     expect(result.purchase?.productId, 'subscription');
     expect(coordinator.accessState.value.shouldGrantAccess, isFalse);
+    expect(coordinator.activity.value.showBlockingLoading, isFalse);
+    await pumpEventQueue();
     expect(coordinator.activity.value.isLoading, isFalse);
   });
 

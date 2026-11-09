@@ -1,6 +1,7 @@
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_access_state.dart';
+import 'subscription_snapshot.dart';
 import 'subscription_failure.dart';
 import 'subscription_plan.dart';
 import 'subscription_store_adapter.dart';
@@ -67,11 +68,30 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
             'The selected Google Play offer does not belong to the product.',
       );
     }
+    final replacement = options.replacementAndroid;
+    if (replacement != null &&
+        (replacement.purchaseToken.isEmpty ||
+            replacement.oldProductId.isEmpty ||
+            replacement.mode ==
+                SubscriptionReplacementModeAndroid.UnknownReplacementMode)) {
+      throw const SubscriptionStoreException(
+        failureCode: SubscriptionFailureCode.invalidReplacement,
+        message:
+            'A replacement requires an old product, purchase token and supported mode.',
+      );
+    }
     return iap.requestPurchase(
       RequestPurchaseProps.subs((
         apple: null,
         google: RequestSubscriptionAndroidProps(
           skus: <String>[product.id],
+          purchaseToken: replacement?.purchaseToken,
+          subscriptionProductReplacementParams: replacement == null
+              ? null
+              : SubscriptionProductReplacementParamsAndroid(
+                  oldProductId: replacement.oldProductId,
+                  replacementMode: replacement.mode,
+                ),
           subscriptionOffers: <AndroidSubscriptionOfferInput>[
             AndroidSubscriptionOfferInput(sku: product.id, offerToken: token),
           ],
@@ -137,12 +157,11 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
   }
 
   @override
-  Future<SubscriptionAccessResolution> resolveVerifiedAccessState({
+  Future<SubscriptionSnapshot> resolveVerifiedAccessState({
     required FlutterInappPurchase iap,
     required List<ActiveSubscription> subscriptions,
     required List<ProductSubscription> products,
-    required List<String> productIds,
-    required String fallbackProductId,
+    required List<String>? productIds,
     DateTime? now,
   }) async {
     if (licenseKey.trim().isEmpty) {
@@ -156,7 +175,11 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     final List<PurchaseAndroid> purchases =
         (await iap.getAvailablePurchases(includeSuspendedAndroid: true))
             .whereType<PurchaseAndroid>()
-            .where((purchase) => productIds.contains(purchase.productId))
+            .where(
+              (purchase) => productIds == null
+                  ? subscriptions.any((s) => s.productId == purchase.productId)
+                  : productIds.contains(purchase.productId),
+            )
             .toList(growable: false);
     final List<PurchaseAndroid> verifiedPurchases = purchases
         .where(
@@ -186,60 +209,40 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         })
         .toList(growable: false);
 
-    if (verifiedSubscriptions.any((subscription) => subscription.isActive)) {
-      return (
-        state:
-            AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-              verifiedSubscriptions,
-              fallbackProductId: fallbackProductId,
-              now: now,
-            ),
-        queryFailedProductIds: const <String>{},
-      );
-    }
-
-    for (final purchase in verifiedPurchases) {
-      if (purchase.isSuspendedAndroid == true) {
-        return (
-          state: SubscriptionAccessState(
-            status: SubscriptionAccessStatus.suspended,
-            evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-            productId: purchase.productId,
-            transactionId: purchase.transactionId ?? purchase.id,
-            note: 'Google Play subscription is suspended',
-          ),
-          queryFailedProductIds: const <String>{},
-        );
-      }
-    }
-
-    final bool hasUnverifiedOwnedPurchase = purchases.any(
-      (purchase) =>
-          purchase.purchaseState == PurchaseState.Purchased &&
-          !verifiedPurchases.contains(purchase),
-    );
-    if (hasUnverifiedOwnedPurchase) {
-      return (
-        state: SubscriptionAccessState(
-          status: SubscriptionAccessStatus.unavailable,
-          evaluatedAtMs: (now ?? DateTime.now()).millisecondsSinceEpoch,
-          productId: fallbackProductId,
-          note: 'Google Play purchase signature verification failed',
-          reason: SubscriptionAccessReason.localVerificationFailed,
+    final nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
+    final states = <SubscriptionAccessState>[
+      for (final subscription in verifiedSubscriptions)
+        AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
+          subscription: subscription,
+          now: now,
         ),
-        queryFailedProductIds: const <String>{},
+    ];
+    for (final purchase in purchases) {
+      if (states.any(
+        (s) =>
+            s.productId == purchase.productId &&
+            s.transactionId == (purchase.transactionId ?? purchase.id),
+      ))
+        continue;
+      final verified = verifiedPurchases.contains(purchase);
+      states.add(
+        SubscriptionAccessState(
+          store: IapStore.Google,
+          status: !verified
+              ? SubscriptionAccessStatus.unavailable
+              : purchase.isSuspendedAndroid == true
+              ? SubscriptionAccessStatus.suspended
+              : SubscriptionAccessStatus.expired,
+          evaluatedAtMs: nowMs,
+          productId: purchase.productId,
+          transactionId: purchase.transactionId ?? purchase.id,
+          reason: verified
+              ? SubscriptionAccessReason.noCurrentSubscription
+              : SubscriptionAccessReason.localVerificationFailed,
+        ),
       );
     }
-
-    return (
-      state:
-          AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscriptions(
-            const <ActiveSubscription>[],
-            fallbackProductId: fallbackProductId,
-            now: now,
-          ),
-      queryFailedProductIds: const <String>{},
-    );
+    return SubscriptionSnapshot(evaluatedAtMs: nowMs, subscriptions: states);
   }
 
   @override

@@ -115,6 +115,14 @@ class AndroidSubscriptionHelper {
   }) {
     final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
     return SubscriptionAccessState(
+      store: IapStore.Google,
+      purchaseTokenAndroid:
+          subscription.purchaseTokenAndroid ?? subscription.purchaseToken,
+      renewal: subscription.autoRenewingAndroid == null
+          ? null
+          : SubscriptionRenewal(
+              autoRenewEnabled: subscription.autoRenewingAndroid!,
+            ),
       status: subscription.isActive
           ? SubscriptionAccessStatus.active
           : SubscriptionAccessStatus.expired,
@@ -124,37 +132,6 @@ class AndroidSubscriptionHelper {
       note: subscription.isActive
           ? 'active Google Play subscription'
           : 'inactive Google Play subscription',
-    );
-  }
-
-  /// 从多个 Google Play 当前订阅中选择可授予权益的状态。
-  static SubscriptionAccessState resolveAccessStateFromActiveSubscriptions(
-    List<ActiveSubscription> subscriptions, {
-    required String fallbackProductId,
-    DateTime? now,
-  }) {
-    final int nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    if (subscriptions.isEmpty) {
-      return SubscriptionAccessState(
-        status: SubscriptionAccessStatus.expired,
-        evaluatedAtMs: nowMs,
-        productId: fallbackProductId,
-        note: 'no active Google Play subscription',
-        reason: SubscriptionAccessReason.noCurrentSubscription,
-      );
-    }
-
-    for (final ActiveSubscription subscription in subscriptions) {
-      if (subscription.isActive) {
-        return resolveAccessStateFromActiveSubscription(
-          subscription: subscription,
-          now: now,
-        );
-      }
-    }
-    return resolveAccessStateFromActiveSubscription(
-      subscription: subscriptions.first,
-      now: now,
     );
   }
 }

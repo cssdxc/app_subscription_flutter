@@ -1,7 +1,7 @@
 name: app_subscription_core
 description: Shared subscription primitives for Flutter apps using flutter_inapp_purchase.
 publish_to: "none"
-version: 2.0.1
+version: 2.0.2
 
 environment:
   sdk: ">=3.11.0 <4.0.0"
@@ -10,7 +10,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_inapp_purchase: ^11.0.3
+  # 状态关联依赖此版本的原生已验证 JSON 契约，升级需重新核对。
+  flutter_inapp_purchase: 11.0.3
   intl: ^0.20.3
   pointycastle: 4.0.0
   shared_preferences: ^2.5.6

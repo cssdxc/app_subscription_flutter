@@ -23,7 +23,9 @@ enum SubscriptionFailureCode {
   acknowledgementFailed('acknowledgement-failed'),
   localVerificationFailed('local-verification-failed'),
   missingLicenseKey('missing-license-key'),
-  missingPurchaseToken('missing-purchase-token');
+  missingPurchaseToken('missing-purchase-token'),
+  invalidReplacement('invalid-replacement'),
+  verificationRequired('verification-required');
 
   const SubscriptionFailureCode(this.code);
 

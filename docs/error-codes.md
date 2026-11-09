@@ -7,7 +7,7 @@
 
 规则：
 
-- 成功和待处理返回 `null`，不按失败提示。
+- 成功、待付款（pending）和未确认（unconfirmed）返回 `null`，不按失败提示。
 - 取消固定返回 `1001`。
 - 失败优先按 `failureCode` 返回封装错误码；没有封装原因时按 `storeErrorCode` 返回商店错误码。
 - 商店未知错误返回 `1999`；两类原因都没有的失败返回 `2999`。
@@ -86,7 +86,12 @@
 | `localVerificationFailed` | 2022 |
 | `missingLicenseKey` | 2023 |
 | `missingPurchaseToken` | 2024 |
+| `invalidReplacement` | 2025 |
+| `verificationRequired` | 2026 |
 | 无具体分类的失败 | 2999 |
 
 `DeferredPayment`、`Pending` 和 `purchasePending` 在码表中保留编号，
 但正常通过 `SubscriptionActionResult.failure` 创建的结果属于待处理，`numericCode` 返回 `null`。
+
+`scheduled` 是已确认成功的预约变更，不是待付款；当前权益仍来自快照。
+`unconfirmed` 表示等待结束时证据不足，不是商店拒绝，也不取消或自动重试购买。

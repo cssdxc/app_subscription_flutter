@@ -11,9 +11,10 @@
 - 处理已购买、待付款、宽限期与商店明确返回的暂停等状态
 - 在验证成功后完成 App Store 交易或确认 Google Play 交易
 - 缓存最近一次已验证权益快照
-- 使用商店原生数据在设备端验证购买，并按需回传统一交易 payload
+- 验证商店购买，支持宿主服务端返回权威订阅快照，并独立回传交易 payload
 
-UI、文案、路由、埋点和订阅失效后的业务处理仍由宿主工程负责。
+业务功能权限、UI、文案、路由和埋点由宿主负责。插件不定义业务档位，不复制 Apple 等级配置。
+当前权益与未来续订目标分别输出，多种商品可以同时有效。
 
 ## SDK 基线
 
@@ -26,14 +27,14 @@ UI、文案、路由、埋点和订阅失效后的业务处理仍由宿主工程
 - `openiap-google 4.0.3`
 - Google Play Billing Library `9.1.0`
 
-全部直接依赖的升级情况：
+直接依赖基线（历史升级记录，非实时版本查询）：
 
 | 依赖 | 原约束 | 当前约束 | 说明 |
 | --- | --- | --- | --- |
-| `flutter_inapp_purchase` | `^10.6.0` | `^11.0.3` | 最新稳定版，包含主版本迁移 |
-| `shared_preferences` | `^2.5.4` | `^2.5.6` | 最新稳定版，更新 SDK 下限与返回值文档 |
-| `pointycastle` | `4.0.0` | `4.0.0` | 已是最新稳定版 |
-| `flutter_lints` | `^6.0.0` | `^6.0.0` | 已是最新稳定版 |
+| `flutter_inapp_purchase` | `^10.6.0` | `11.0.3` | 固定已核对的数据契约；升级需重新验证原生字段 |
+| `shared_preferences` | `^2.5.4` | `^2.5.6` | 更新 SDK 下限与返回值文档 |
+| `pointycastle` | `4.0.0` | `4.0.0` | RSA 验证 |
+| `flutter_lints` | `^6.0.0` | `^6.0.0` | 静态检查 |
 | `intl` | 未直接依赖 | `^0.20.3` | 新增平均价格式化，使用 ISO 币种和本地化精度 |
 | `platform` | `^3.1.6` | `>=3.1.6 <3.2.0` | 最新版为 3.2.0，但购买插件 11.0.3 要求 `<3.2.0`，保留最新兼容版 3.1.6 |
 
@@ -108,20 +109,22 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前 Git 发布版本为 `2.0.1`，公共接口不提供旧接口兼容层。
-接入方通过固定 Git 标签依赖，具体变化见 [版本记录](CHANGELOG.md)：
+当前版本为 `2.0.2`，使用固定 Git 标签接入：
 
 ```yaml
 dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 2.0.1
+      ref: 2.0.2
 ```
+
+从旧版升级需要迁移 `accessState` 和操作结果分支，见
+[订阅变更与迁移说明](docs/subscription-tier-change-plan.md)。
 
 ### 1. 配置逻辑套餐
 
-宿主自己的枚举映射到 `SubscriptionPlan`，不需要再在购买和价格获取处判断平台。
+宿主自己的枚举映射到 `SubscriptionPlan`，只配置当前提供购买的套餐，不需要加入历史商品。
 iOS 的不同商品与 Android 同一商品下的不同 base plan 可以表示为同一逻辑套餐：
 
 ```dart
@@ -178,6 +181,18 @@ Android 普通套餐只配置 `productId` 和 `basePlanId`，不需要填写 `of
 `purchasePlan` 接收配置中的套餐对象，拒绝购买未注册套餐。
 Android 请求按当前平台去重 product ID；两个套餐共用一个商品只查询一次。
 单平台套餐可以只配置对应映射，在另一平台返回 `invalidProductPlatform`。
+
+权益识别独立于在售套餐。`subscriptionProductIds` 默认 `null`，查询本 App 全部订阅，
+包括仍有效的历史商品；历史商品不会加入套餐或价格展示列表。单一权益 App 直接监听：
+
+```dart
+final hasPaidAccess = coordinator.accessState.value.shouldGrantAccess;
+```
+
+不需要维护历史 SKU 白名单。插件仍验证订阅及当前状态，不将普通内购、待付款或已失效记录授权。
+需要限定识别范围时，可以显式设置当前商店的 `subscriptionProductIds`；该过滤也作用于
+恢复、服务端快照和缓存，不随支付墙套餐的变化而改变。空列表表示不识别任何订阅。
+只查询权益时可传 `plans: []`，不会请求空商品价格列表；购买仍要求目标套餐已注册。
 
 ### 2. 展示价格、平均价与试用资格
 
@@ -248,13 +263,17 @@ final result = await coordinator.purchasePlan(
 
 switch (result.outcome) {
   case SubscriptionActionOutcome.success:
-    // 已验证并完成或确认本次购买。
+    // effect 为 applied（当前生效）或 scheduled（已确认预约）。
+    // 功能门禁始终读取 accessState，不根据 success 直接放行。
     break;
   case SubscriptionActionOutcome.cancelled:
     // 用户取消，通常无需错误提示。
     break;
   case SubscriptionActionOutcome.pending:
     // 等待付款或外部批准，不能按本次购买授予权益。
+    break;
+  case SubscriptionActionOutcome.unconfirmed:
+    // 尚无足够证据；允许刷新，不自动重试付款。
     break;
   case SubscriptionActionOutcome.failure:
     // 使用 result.failureCode 或官方 result.storeErrorCode 枚举决定提示。
@@ -269,7 +288,7 @@ final restored = await coordinator.restore(source: 'settings');
 `numericCode` 是本库统一定义的固定数字错误码，并非 Apple 或 Google 的原生响应值。
 宿主直接读取该属性，并自行组合本地化文案，例如 `取消 (1001)`，无需再维护映射表。
 商店错误为 1001–1999，封装错误为 2001–2999；取消为 1001，未知商店错误为 1999，
-无具体分类的失败为 2999。成功和待处理返回 `null`。失败同时包含两类错误时优先使用封装原因。
+无具体分类的失败为 2999。成功、待付款和未确认返回 `null`。失败同时包含两类错误时优先使用封装原因。
 完整编号见[数字错误码](docs/error-codes.md)；编号显式固定，不随枚举顺序变化，业务判断继续使用枚举。
 商品查询及交易处理遇到 `PurchaseError` 时保留原错误码，不统一改为连接失败。
 未查到有效权益返回 `subscriptionInactive`；StoreKit 分组状态查询失败返回
@@ -309,7 +328,8 @@ Android 的 `offerId`。本封装未提供需要签名的 App Store promotional 
 并负责颜色、尺寸、动画、文案、交互拦截和失败提示。
 重复调用初始化、商品加载、试用资格查询或权益刷新会共用进行中的 Future。
 `loadProducts` 返回查询是否成功，成功时列表仍可能为空。初始化和回到前台时查询商品，
-也可显式调用 `loadProducts(force: true)` 刷新；不设置定时轮询。
+也可显式调用 `loadProducts(force: true)` 刷新。权益在已知到期、续订或缓存期限边界安排一次查询，
+不根据定时器自行切换商品，也不设置固定轮询。
 购买复用已加载的商品和所选优惠；有商品刷新正在进行时等待完成，缺少商品时先查询。
 OpenIAP Google `4.0.3` 的原生 `requestPurchase` 已在构造购买参数前查询最新 `ProductDetails`，
 并校验传入的优惠令牌，core 不重复执行一次商品查询。失效优惠返回商店错误，不自动另选套餐。
@@ -330,15 +350,16 @@ Google 未规定商品详情的固定失效分钟数。Apple 按商品 ID 发起
 购买与恢复会等待同一次初始化，调用者无须维护初始化 Future 或每次手动调用 `init`。
 页面展示前可主动调用 `init` 提前加载商品；重复调用会共用同一个 Future。
 
-`isConfigured` 只表示当前平台、商品映射和必需验证配置完整，不代表商店已连接、
-商品已加载或用户已订阅。具体问题由 `configurationFailure` 返回枚举：
-不支持的平台为 `unsupportedPlatform`，当前平台无商品为 `planNotConfigured`，
+`isConfigured` 表示当前平台与必需验证配置可用于订阅工作，不代表已有可购买套餐、
+商店已连接或用户已订阅。具体问题由 `configurationFailure` 返回枚举：
+不支持的平台为 `unsupportedPlatform`，在售与权益识别范围都显式为空时为 `planNotConfigured`，
 默认 Google Play 适配器缺公钥为 `missingLicenseKey`。
-空配置可以正常创建和释放，不连接商店、不读写权益缓存，也不授予权益。
+`plans: []` 默认仍查询全部订阅；同时设置 `subscriptionProductIds: []` 才禁用订阅工作。
 
 `init` 读取六小时内的权益缓存、注册生命周期与购买监听、连接商店、加载套餐、查询权益，
 不触发 App Store 恢复。回到前台时重新查询商店；离线只采用六小时内的快照，
-未来时间、损坏、超时，以及不再属于配置商品的可授权快照均不采用。
+未来时间、损坏、超时，以及显式识别范围之外的缓存均不采用。
+默认全量识别时，不因商品停止展示或从在售套餐移除而过滤其有效缓存。
 缓存有效期仅用于快照新鲜度，不替代商店生命周期判断。
 StoreKit 状态查询异常以 `SubscriptionAccessReason.storeQueryFailed` 区分，采用缓存时保留
 原始快照与时间戳，不延长有效期。商店明确返回过期、撤销，或缺少已验证权益时，
@@ -355,33 +376,94 @@ await coordinator.dispose();
 释放会取消事件与生命周期监听，并完成等待中的购买 Future，返回 `disposed`。
 释放后到达的异步查询不会再写入通知器。
 
-## 权益验证与职责边界
+## 当前权益、续订与服务端验证
 
-两端维持设备端验证：Apple 使用 StoreKit 2 的已验证权益与订阅状态；Google 使用
-Play Console RSA 公钥验证原始购买签名，并按购买令牌与商品关联当前订阅。
-只有验证且权益有效后才完成或确认交易。Android acknowledge 返回 false 时返回
-`acknowledgementFailed`，可在后续恢复中重试。
-`transactionReporter` 在商店交易完成后独立执行，仅用于记录交易。购买和恢复结果不等待
-该回调，回调异常仅写日志，不影响交易结果，也不提供持久化或自动重试保证。
-需要可靠记录时，由宿主自行接入持久化与服务端处理。
+`accessState.value` 现在为 `SubscriptionSnapshot`，保留识别范围内的订阅记录，默认覆盖本 App 全部订阅。
+`activeSubscriptions` 只包含 `active/gracePeriod`；顶层 `shouldGrantAccess` 仅表示存在有效订阅。
+多功能 App 应将具体商品映射为功能，不能用这个布尔值开放所有付费能力：
 
-单笔交易的验证结果只决定该笔交易能否完成；全局 `accessState` 始终按全部配置商品聚合。
-其他商品的过期、暂停或验证失败事件不会直接覆盖已有的有效权益。批量恢复在批次末统一
-刷新全局权益和试用资格，不再逐笔重复刷新试用资格。
+```dart
+// 只属于宿主 App 的业务配置。
+const featuresByAppleProduct = {
+  'am_year_1': {'recording'},
+  'am_year_2': {'recording', 'navigation'},
+};
+final enabledFeatures = <String>{
+  for (final record in coordinator.accessState.value.activeSubscriptions)
+    if (record.store == IapStore.Apple)
+      ...(featuresByAppleProduct[record.productId] ?? <String>{}),
+};
+```
 
-Apple `isTransactionVerifiedIOS` 验证交易真实性，不证明订阅当前有效；本封装不会据此
-人工构造当前权益。`subscribed/inGracePeriod` 结合已验证当前权益授予访问；宽限期不能只看插件的
-`isActive` 布尔值。`inBillingRetryPeriod/expired/revoked` 不授予访问。未知状态仅可
-使用 StoreKit 已验证且 `isActive` 的权益降级，日期字段不参与推测。
-Google 的 pending 与 `isSuspendedAndroid` 不授予新权益，也不确认待付款交易。
-暂停映射为 `SubscriptionAccessStatus.suspended`，不据此推断为 Apple 的扣款重试，
-也不区分账号保留和用户暂停。购买签名验证失败映射为 `unavailable` 与
-`localVerificationFailed`，不解释为商店撤销，也不借查询失败缓存放行。
-当前订阅查询与签名购买记录必须匹配商品、令牌；后查到的购买记录若已暂停或仍待付款，
-不能仅凭前一次查询的 `isActive` 放行。
+Android 按 `store/productId/basePlanIdAndroid` 映射；同一 base plan 的 offer 不改变权益身份。
+未配置业务映射或身份未知时，宿主自行决定权限策略，插件不按价格或 SKU 名称猜等级。
+`renewal.nextProductId/nextBasePlanIdAndroid` 仅表示未来续订，不能授权目标功能。
+关闭自动续订保留当前已付费权益。
 
-退款、撤销等在启动、恢复或前台查询时更新；需要 App 未运行时同步时，应由宿主接入
-服务端通知和商店服务端验证，当前设备端封装不承担该职责。
+Apple 在 App Store Connect 的同一订阅组内配置等级；仍通过 `purchasePlan(target)` 切换。
+升级、降级及同级跨周期的计费和生效时间由 StoreKit 决定，插件依据实际结果输出
+`applied/scheduled`，不自行退款或计算差价。底层 Dart 请求丢弃原生返回载荷，
+因此本库在请求返回后刷新，并等待交易事件；默认两分钟未取得证据返回 `unconfirmed`。
+`purchaseTimeout` 仅限制调用等待，不取消商店付款，迟到事件仍会同步。
+
+Apple 使用 StoreKit 已验证当前权益及其关联状态。`subscribed/inGracePeriod` 需要存在对应的
+已验证当前交易；不把同组其他交易的状态或 `autoRenewPreference` 当成当前商品。
+`billingRetry/expired/revoked` 不授权。原生已验证的历史交易可以 finish，当前权益另行判断。
+
+Google 本地路径验证 RSA 签名、商品与令牌，并排除 pending/suspended。
+底层 `4.0.3` 的 `getActiveSubscriptions` 会从商品目录补全 base plan，不能证明实际已购套餐，
+所以本库的本地结果将 `basePlanIdAndroid` 保留为 `null`。本地路径可提供商品维度的权益，
+但无法确认精确 base plan 的购买效果，结果可能为 `unconfirmed`。
+
+需要准确套餐身份、账号统一权益或 Android 替换时，配置 `verifiedSubscriptionQuery`。
+配置后它是权益快照的唯一查询来源，失败不会静默改用设备查询：
+
+```dart
+SubscriptionCoordinatorConfig(
+  plans: plans.values.toList(),
+  googlePlayLicenseKeyAndroid: googlePlayLicenseKey,
+  verifiedSubscriptionQuery: (request) async {
+    // 宿主调用自己的后端，后端验证账号归属和商店证据。
+    // request.productIds 为 null 时返回该账号的全部已验证订阅。
+    // request.purchase 在交易完成/确认前提供；普通刷新时为空。
+    return backend.verifyAndQuerySubscriptions(request);
+  },
+);
+```
+
+该回调返回商店事实，不能直接返回业务会员布尔值。服务端必须维护账号关联的购买证据，并验证应用、账号关联、交易/令牌，
+区分当前与未来明细；Google 使用 `purchases.subscriptionsv2.get` 的实际 `lineItems/offerDetails`，
+处理 `linkedPurchaseToken` 的旧令牌失效。收到无效证据应抛出 `localVerificationFailed`，
+查询暂时失败可抛出 `storeQueryFailed` 或返回精确的 `queryFailedProductIds`。
+记录必须携带实际 `store/productId`、各自证据时间和可取得的身份字段。
+
+Android 显式替换还需要旧购买上下文及官方策略：
+
+```dart
+final result = await coordinator.purchasePlan(
+  targetPlan,
+  source: 'change_subscription',
+  options: SubscriptionPurchaseOptions(
+    replacementAndroid: GooglePlayReplacement(
+      purchaseToken: current.purchaseTokenAndroid!,
+      oldProductId: current.productId,
+      mode: SubscriptionReplacementModeAndroid.Deferred,
+    ),
+  ),
+);
+```
+
+此选项仅用于 Google Play，必须配置权威验证回调，否则返回 `verificationRequired`。
+库核对当前持有的旧购买并验证签名，传递旧 token、旧商品和替换方式，不声明升降级方向。
+策略支持范围由 Google 决定；`WithoutProration` 会立即切换权益，不能当作 `Deferred`。
+延后替换的新购买也需要及时确认，回调应将新 token 关联到仍有效的当前明细及已证实的未来目标，
+不能提前开放未来功能。Google 仅在对应 token 有新鲜有效权益后 acknowledge；失败返回
+`acknowledgementFailed`，后续恢复可重试。
+
+`transactionReporter` 在交易完成后独立执行，仅用于记录，异常只记日志；不保证持久化和重试，
+不能作为授权回调。全局快照按独立的权益识别范围刷新，单笔失败不会直接覆盖其他有效商品。
+退款、续订、外部变更依靠启动、事件、前台、恢复和边界查询同步；App 未运行时的同步由
+宿主服务端处理 App Store Server Notifications / Google RTDN。
 
 | 文件/类型 | 单一职责 |
 | --- | --- |
@@ -395,7 +477,8 @@ Google 的 pending 与 `isSuspendedAndroid` 不授予新权益，也不确认待
 | `SubscriptionStoreAdapter` | 平台适配契约及购买账户参数 |
 | `app_store_subscription_adapter.dart` | StoreKit 请求、验证、完成交易与权益映射 |
 | `google_play_subscription_adapter.dart` | Play 请求、签名验证、确认与权益映射 |
-| `SubscriptionEntitlementCache` | 内部缓存序列化与新鲜度检查 |
+| `SubscriptionSnapshot/SubscriptionAccessState` | 多项商店记录、当前状态与续订设置 |
+| `SubscriptionEntitlementCache` | 版本化缓存、逐记录新鲜度与已知到期检查 |
 
 默认入口仅导出接入所需的公共 API 与适配契约；平台 Helper、具体适配器、交易处理器和
 缓存实现保留在内部。一般接入方只需配置套餐、持有协调器并监听只读状态。
@@ -422,6 +505,11 @@ Google 的 pending 与 `isSuspendedAndroid` 不授予新权益，也不确认待
   中的 `BillingConverters.kt`、`OpenIapModule.kt`
 - [统一 SubscriptionOffer 字段](https://openiap.dev/docs/types/subscription-offer)
 - [Apple 试用资格查询](https://openiap.dev/docs/apis/ios/is-eligible-for-intro-offer-ios)
+- [Apple 订阅组、等级与升降级](https://developer.apple.com/app-store/subscriptions/)
+- [Apple 已验证续订 JSON](https://developer.apple.com/documentation/storekit/product/subscriptioninfo/renewalinfo/jsonrepresentation)
+- [Google 订阅替换](https://developer.android.com/google/play/billing/subscriptions)
+- [Google 权威订阅明细](https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get)
+- [Apple 当前权益查询](https://developer.apple.com/documentation/storekit/transaction/currententitlements)
 - [StoreKit 订阅状态](https://developer.apple.com/documentation/storekit/product/subscriptioninfo/status)
 - [Google PricingPhase](https://developer.android.com/reference/com/android/billingclient/api/ProductDetails.PricingPhase)
 - [Google RecurrenceMode](https://developer.android.com/reference/com/android/billingclient/api/ProductDetails.RecurrenceMode)

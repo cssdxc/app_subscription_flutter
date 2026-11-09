@@ -4,7 +4,16 @@ import 'subscription_error_codes.dart';
 import 'subscription_failure.dart';
 
 /// 一次操作的互斥结果，调用方使用 switch 处理。
-enum SubscriptionActionOutcome { success, cancelled, pending, failure }
+enum SubscriptionActionOutcome {
+  success,
+  cancelled,
+  pending,
+  unconfirmed,
+  failure,
+}
+
+/// 已确认成功操作的生效方式；预约不授予目标商品权益。
+enum SubscriptionPurchaseEffect { applied, scheduled }
 
 /// 订阅操作的业务类型。
 enum SubscriptionActionType {
@@ -30,6 +39,7 @@ class SubscriptionActionResult {
     this.message,
     this.purchase,
     this.restoredCount = 0,
+    this.effect,
   });
 
   final SubscriptionActionType type;
@@ -45,17 +55,19 @@ class SubscriptionActionResult {
   final String? message;
   final Purchase? purchase;
   final int restoredCount;
+  final SubscriptionPurchaseEffect? effect;
 
   /// 只用于日志或上报，不用于业务分支判断。
   String? get code => failureCode?.code ?? storeErrorCode?.value;
 
   /// 本库统一定义的数字错误码，并非 Apple 或 Google 的原生响应值。
-  /// 成功和等待返回空；取消为 1001，商店错误为 1001–1999，封装错误为 2001–2999。
+  /// 成功、待付款和未确认返回空；取消为 1001，商店错误为 1001–1999，封装错误为 2001–2999。
   /// 失败优先使用封装原因，无分类时为 2999；文案和展示由宿主负责。
   int? get numericCode {
     switch (outcome) {
       case SubscriptionActionOutcome.success:
       case SubscriptionActionOutcome.pending:
+      case SubscriptionActionOutcome.unconfirmed:
         return null;
       case SubscriptionActionOutcome.cancelled:
         return storeErrorNumericCode(ErrorCode.UserCancelled);
@@ -79,6 +91,7 @@ class SubscriptionActionResult {
     Purchase? purchase,
     int restoredCount = 0,
     String? message,
+    SubscriptionPurchaseEffect? effect,
   }) => SubscriptionActionResult(
     type: type,
     outcome: SubscriptionActionOutcome.success,
@@ -86,6 +99,7 @@ class SubscriptionActionResult {
     productId: productId,
     purchase: purchase,
     restoredCount: restoredCount,
+    effect: effect,
     message: message,
   );
 
