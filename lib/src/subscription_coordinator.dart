@@ -73,6 +73,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     isDisposed: () => _isDisposed,
     log: _log,
     reporter: config.transactionReporter,
+    acknowledgementObserver: config.googlePlayAcknowledgementObserver,
     onStoreError: _handleStoreError,
   );
 

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
+import 'google_play_subscription_adapter.dart';
 import 'subscription_action_result.dart';
 import 'subscription_configuration.dart';
 import 'subscription_failure.dart';
@@ -18,6 +19,7 @@ class SubscriptionTransactionProcessor {
     required this.isDisposed,
     required this.log,
     this.reporter,
+    this.acknowledgementObserver,
     required this.onStoreError,
   });
 
@@ -28,6 +30,7 @@ class SubscriptionTransactionProcessor {
   final bool Function() isDisposed;
   final SubscriptionLogger log;
   final SubscriptionTransactionReporter? reporter;
+  final GooglePlayAcknowledgementObserver? acknowledgementObserver;
   final Future<void> Function(ErrorCode?) onStoreError;
 
   Future<SubscriptionActionResult> process(
@@ -71,7 +74,35 @@ class SubscriptionTransactionProcessor {
       final current = await (preparePurchase ?? verifyEntitlement)(purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
       // 真实购买完成与当前权益有效性分别处理；历史或延后生效购买也要完成。
-      await adapter.finishTransaction(iap: iap, purchase: current);
+      final storeAdapter = adapter;
+      final observer = acknowledgementObserver;
+      if (storeAdapter is GooglePlaySubscriptionAdapter &&
+          current is PurchaseAndroid &&
+          observer != null) {
+        await storeAdapter.finishTransaction(
+          iap: iap,
+          purchase: current,
+          onAcknowledgement: (error) {
+            final transactionId = current.transactionId;
+            unawaited(
+              _observeAcknowledgement(
+                observer,
+                GooglePlayAcknowledgementEvent(
+                  productId: current.productId,
+                  transactionId: transactionId != current.purchaseToken
+                      ? transactionId
+                      : null,
+                  type: type,
+                  source: source,
+                  error: error,
+                ),
+              ),
+            );
+          },
+        );
+      } else {
+        await storeAdapter.finishTransaction(iap: iap, purchase: current);
+      }
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
       // 商店交易完成后独立记录，回调不属于购买完成条件。
       unawaited(_report(purchase));
@@ -104,6 +135,18 @@ class SubscriptionTransactionProcessor {
         SubscriptionFailureCode.processingException,
         message: error.toString(),
       );
+    }
+  }
+
+  Future<void> _observeAcknowledgement(
+    GooglePlayAcknowledgementObserver observer,
+    GooglePlayAcknowledgementEvent event,
+  ) async {
+    if (isDisposed()) return;
+    try {
+      await observer(event);
+    } catch (error) {
+      log('Google Play 确认回调失败: $error');
     }
   }
 

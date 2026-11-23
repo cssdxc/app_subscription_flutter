@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_action_result.dart';
@@ -12,6 +14,10 @@ typedef SubscriptionLogger = void Function(String message);
 /// 独立记录通过验证且已完成商店交易的载荷，不阻塞购买或恢复结果。
 typedef SubscriptionTransactionReporter =
     Future<void> Function(SubscriptionTransactionPayload payload);
+
+/// 观察 Google Play 确认尝试的结果，用于埋点或诊断。
+typedef GooglePlayAcknowledgementObserver =
+    FutureOr<void> Function(GooglePlayAcknowledgementEvent event);
 
 /// 观察购买、恢复和同步操作的开始与结束事件。
 typedef SubscriptionActionObserver =
@@ -53,6 +59,7 @@ class SubscriptionCoordinatorConfig {
     this.googlePlayLicenseKeyAndroid = '',
     this.logger,
     this.transactionReporter,
+    this.googlePlayAcknowledgementObserver,
     this.actionObserver,
     this.activeSubscriptionQuery,
     this.verifiedSubscriptionQuery,
@@ -81,6 +88,9 @@ class SubscriptionCoordinatorConfig {
 
   /// 可选的交易记录回调；异常仅记日志，不参与授权或重试。
   final SubscriptionTransactionReporter? transactionReporter;
+
+  /// 每次向 Google Play 发起确认后通知一次，包括自动重试；不等待回调完成。
+  final GooglePlayAcknowledgementObserver? googlePlayAcknowledgementObserver;
 
   /// 可选的订阅操作生命周期观察器。
   final SubscriptionActionObserver? actionObserver;

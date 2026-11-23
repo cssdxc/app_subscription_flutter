@@ -1,7 +1,7 @@
 # 订阅核心架构
 
 核对日期：2026-11-23。实现基线为 `flutter_inapp_purchase 11.0.3`、
-OpenIAP Apple / Google `4.0.3`。发布版本为 `2.0.3`。
+OpenIAP Apple / Google `4.0.3`。发布版本为 `2.0.4`。
 
 ## 职责
 

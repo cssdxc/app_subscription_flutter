@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:flutter/services.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 
 import 'subscription_access_state.dart';
@@ -28,6 +31,8 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
 
   /// Play Console 提供的 Base64 编码 RSA 公钥。
   final String licenseKey;
+
+  static const _billingChannel = MethodChannel('flutter_inapp');
 
   @override
   Future<Map<String, SubscriptionTrialEligibility>> queryTrialEligibility({
@@ -118,6 +123,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
   Future<void> finishTransaction({
     required FlutterInappPurchase iap,
     required Purchase purchase,
+    void Function(GooglePlayAcknowledgementError?)? onAcknowledgement,
   }) async {
     final PurchaseAndroid item = purchase as PurchaseAndroid;
     if (item.isAcknowledgedAndroid == true) {
@@ -130,13 +136,59 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         message: 'Google Play purchase token is required for acknowledgement.',
       );
     }
-    final bool acknowledged = await iap.acknowledgePurchaseAndroid(token);
-    if (!acknowledged) {
+    Never fail(GooglePlayAcknowledgementError error) {
+      onAcknowledgement?.call(error);
       throw const SubscriptionStoreException(
         failureCode: SubscriptionFailureCode.acknowledgementFailed,
         message: 'Google Play did not acknowledge the subscription purchase.',
       );
     }
+
+    final Object? reply;
+    try {
+      // 11.0.3 的 Dart 布尔接口会丢弃原生异常；直接使用同一确认通道。
+      reply = await _billingChannel.invokeMethod<Object?>(
+        'acknowledgePurchaseAndroid',
+        {'purchaseToken': token},
+      );
+    } on PlatformException catch (error) {
+      fail(
+        _billingFailure(
+          error.details,
+          nativeCode: error.code,
+          nativeMessage: error.message,
+        ),
+      );
+    } on MissingPluginException catch (error) {
+      fail(GooglePlayAcknowledgementError(nativeMessage: error.message));
+    }
+
+    final Object? result;
+    try {
+      result = reply is String ? jsonDecode(reply) : reply;
+    } on FormatException {
+      fail(const GooglePlayAcknowledgementError());
+    }
+    if (result != true && (result is! Map || result['responseCode'] != 0)) {
+      fail(_billingFailure(result));
+    }
+    onAcknowledgement?.call(null);
+  }
+
+  static GooglePlayAcknowledgementError _billingFailure(
+    Object? details, {
+    String? nativeCode,
+    String? nativeMessage,
+  }) {
+    final fields = details is Map ? details : null;
+    final responseCode = fields?['responseCode'];
+    final debugMessage = fields?['debugMessage'];
+    return GooglePlayAcknowledgementError(
+      responseCode: responseCode is int ? responseCode : null,
+      debugMessage: debugMessage is String ? debugMessage : null,
+      nativeCode: nativeCode,
+      nativeMessage: nativeMessage,
+    );
   }
 
   @override

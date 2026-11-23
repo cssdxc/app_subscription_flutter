@@ -101,6 +101,8 @@ Future<SubscriptionCoordinator> _androidCoordinator({
   List<SubscriptionPlan>? plans,
   List<String>? subscriptionProductIds,
   SubscriptionActionObserver? actionObserver,
+  GooglePlayAcknowledgementObserver? acknowledgementObserver,
+  SubscriptionLogger? logger,
   ActiveSubscriptionQuery? query,
   VerifiedSubscriptionQuery? verifiedQuery,
   Duration purchaseTimeout = const Duration(seconds: 2),
@@ -130,6 +132,8 @@ Future<SubscriptionCoordinator> _androidCoordinator({
       activeSubscriptionQuery:
           query ?? (_) async => <ActiveSubscription>[_activeSubscription()],
       actionObserver: actionObserver,
+      googlePlayAcknowledgementObserver: acknowledgementObserver,
+      logger: logger,
       verifiedSubscriptionQuery: verifiedQuery,
       purchaseTimeout: purchaseTimeout,
       googlePlayLicenseKeyAndroid: _licenseKey,
@@ -169,8 +173,10 @@ void main() {
       var ackCalls = 0;
       var initCalls = 0;
       final synced = Completer<SubscriptionActionEvent>();
+      final confirmations = <GooglePlayAcknowledgementEvent>[];
       final coordinator = await _androidCoordinator(
         plans: trigger == 'store_reconnected' ? null : const [],
+        acknowledgementObserver: confirmations.add,
         actionObserver: (event) {
           if (event.type == SubscriptionActionType.sync &&
               event.phase == SubscriptionActionPhase.finished &&
@@ -196,7 +202,8 @@ void main() {
             expect(coordinator.accessState.value.shouldGrantAccess, true);
             expect(call.arguments['purchaseToken'], 'purchase-token-1');
             ackCalls++;
-            return acknowledged = true;
+            acknowledged = true;
+            return '{"responseCode":0}';
           }
           return null;
         },
@@ -231,6 +238,13 @@ void main() {
       expect(event.silent, true);
       expect(event.result?.success, true);
       expect(ackCalls, 1);
+      final confirmation = confirmations.single;
+      expect(confirmation.success, true);
+      expect(confirmation.error, isNull);
+      expect(confirmation.type, SubscriptionActionType.sync);
+      expect(confirmation.source, trigger);
+      expect(confirmation.productId, 'subscribe_month_1');
+      expect(confirmation.transactionId, 'order-1');
     });
   }
 
@@ -238,7 +252,9 @@ void main() {
     var queries = 0;
     var attempts = 0;
     final retried = Completer<bool>();
+    final confirmations = <GooglePlayAcknowledgementEvent>[];
     final coordinator = await _androidCoordinator(
+      acknowledgementObserver: confirmations.add,
       actionObserver: (event) {
         if (event.source == 'acknowledgement_retry' &&
             event.phase == SubscriptionActionPhase.finished) {
@@ -253,7 +269,14 @@ void main() {
           attempts++;
           expect(queries, attempts);
           expect(coordinator.accessState.value.shouldGrantAccess, true);
-          return attempts == 2;
+          if (attempts == 1) {
+            throw PlatformException(
+              code: 'service-error',
+              message: 'Billing service is unavailable',
+              details: {'debugMessage': 'Play Billing: unavailable for test'},
+            );
+          }
+          return '{"responseCode":0}';
         }
         return null;
       },
@@ -261,8 +284,43 @@ void main() {
     addTearDown(coordinator.dispose);
     await coordinator.init();
     expect(attempts, 1);
+    final rejected = confirmations.single;
+    expect(rejected.success, false);
+    expect(rejected.source, 'bootstrap');
+    expect(rejected.error?.responseCode, isNull);
+    expect(rejected.error?.debugMessage, 'Play Billing: unavailable for test');
+    expect(rejected.error?.nativeCode, 'service-error');
+    expect(rejected.error?.nativeMessage, 'Billing service is unavailable');
     expect(await retried.future.timeout(const Duration(seconds: 3)), true);
     expect(attempts, 2);
+    expect(confirmations.map((event) => event.success), [false, true]);
+    expect(confirmations.last.source, 'acknowledgement_retry');
+    expect(confirmations.last.transactionId, rejected.transactionId);
+  });
+
+  test('Google 确认回调未完成或失败不阻塞订阅初始化', () async {
+    final report = Completer<void>();
+    final logged = Completer<String>();
+    final coordinator = await _androidCoordinator(
+      plans: const [],
+      acknowledgementObserver: (_) => report.future,
+      logger: (message) {
+        if (message.contains('Google Play 确认回调失败')) logged.complete(message);
+      },
+    );
+    _mockAndroidStore(
+      onCall: (call) async => call.method == 'acknowledgePurchaseAndroid'
+          ? '{"responseCode":0}'
+          : null,
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.init().timeout(const Duration(seconds: 2));
+    expect(coordinator.accessState.value.shouldGrantAccess, true);
+    report.completeError(StateError('telemetry offline'));
+    expect(
+      await logged.future.timeout(const Duration(seconds: 2)),
+      contains('telemetry offline'),
+    );
   });
 
   for (final excluded in [
@@ -283,10 +341,15 @@ void main() {
           return null;
         },
       );
-      final coordinator = await _androidCoordinator(plans: const []);
+      final confirmations = <GooglePlayAcknowledgementEvent>[];
+      final coordinator = await _androidCoordinator(
+        plans: const [],
+        acknowledgementObserver: confirmations.add,
+      );
       addTearDown(coordinator.dispose);
       await coordinator.init();
       expect(attempts, 0);
+      expect(confirmations, isEmpty);
       expect(
         coordinator.accessState.value.shouldGrantAccess,
         excluded.isAcknowledgedAndroid,
@@ -405,6 +468,7 @@ void main() {
   for (final verification in ['verified', 'wrongToken', 'queryFailed']) {
     test('Google 新购买先验证令牌权益再确认：$verification', () async {
       final requested = Completer<void>();
+      final confirmations = <GooglePlayAcknowledgementEvent>[];
       var acknowledgements = 0;
       var verifiedBeforeAck = false;
       _mockAndroidStore(
@@ -419,6 +483,7 @@ void main() {
         },
       );
       final coordinator = await _androidCoordinator(
+        acknowledgementObserver: confirmations.add,
         verifiedQuery: (request) async {
           if (request.purchase != null) {
             expect(request.purchase?.purchaseToken, 'purchase-token-1');
@@ -464,6 +529,8 @@ void main() {
       if (verification == 'verified') {
         expect(result.effect, SubscriptionPurchaseEffect.applied);
         expect(acknowledgements, 1);
+        expect(confirmations.single.type, SubscriptionActionType.purchase);
+        expect(confirmations.single.source, 'test');
       } else {
         expect(
           result.failureCode,
@@ -472,6 +539,7 @@ void main() {
               : SubscriptionFailureCode.storeQueryFailed,
         );
         expect(acknowledgements, 0);
+        expect(confirmations, isEmpty);
         if (verification == 'queryFailed') {
           expect(coordinator.accessState.value.shouldGrantAccess, false);
         }
@@ -873,7 +941,10 @@ void main() {
     () async {
       int acknowledgementCalls = 0;
       var historyAvailable = false;
-      final SubscriptionCoordinator coordinator = await _androidCoordinator();
+      final confirmations = <GooglePlayAcknowledgementEvent>[];
+      final coordinator = await _androidCoordinator(
+        acknowledgementObserver: confirmations.add,
+      );
       addTearDown(coordinator.dispose);
 
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -885,7 +956,9 @@ void main() {
                 return [if (historyAvailable) _purchase().toJson()];
               case 'acknowledgePurchaseAndroid':
                 acknowledgementCalls++;
-                return acknowledgementCalls > 1;
+                return acknowledgementCalls > 1
+                    ? '{"responseCode":0}'
+                    : '{"responseCode":8,"debugMessage":"Item not owned"}';
               case 'endConnection':
                 return true;
             }
@@ -904,6 +977,9 @@ void main() {
 
       expect(result.success, isFalse);
       expect(result.failureCode, SubscriptionFailureCode.acknowledgementFailed);
+      expect(confirmations.single.type, SubscriptionActionType.restore);
+      expect(confirmations.single.error?.responseCode, 8);
+      expect(confirmations.single.error?.debugMessage, 'Item not owned');
 
       final SubscriptionActionResult retry = await coordinator.restore(
         source: 'retry',
@@ -911,6 +987,7 @@ void main() {
 
       expect(retry.success, isTrue, reason: '${retry.code}: ${retry.message}');
       expect(acknowledgementCalls, 2);
+      expect(confirmations.last.success, true);
     },
   );
 
