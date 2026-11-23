@@ -5,6 +5,7 @@ import 'package:app_subscription_core/app_subscription_core.dart';
 import 'package:app_subscription_core/src/android_subscription_helper.dart';
 import 'package:app_subscription_core/src/google_play_subscription_adapter.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_inapp_purchase/flutter_inapp_purchase.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:platform/platform.dart';
@@ -161,6 +162,138 @@ void main() {
 
   setUp(FlutterInappPurchase.resetSharedStateForTesting);
 
+  for (final trigger in ['bootstrap', 'app_resumed', 'store_reconnected']) {
+    test('Google 在 $trigger 静默交付当前权益后补确认', () async {
+      var available = trigger == 'bootstrap';
+      var acknowledged = false;
+      var ackCalls = 0;
+      var initCalls = 0;
+      final synced = Completer<SubscriptionActionEvent>();
+      final coordinator = await _androidCoordinator(
+        plans: trigger == 'store_reconnected' ? null : const [],
+        actionObserver: (event) {
+          if (event.type == SubscriptionActionType.sync &&
+              event.phase == SubscriptionActionPhase.finished &&
+              !synced.isCompleted) {
+            synced.complete(event);
+          }
+        },
+      );
+      _mockAndroidStore(
+        onCall: (call) async {
+          if (call.method == 'initConnection') {
+            initCalls++;
+            return true;
+          }
+          if (call.method == 'getAvailableItems') {
+            expect(call.arguments['includeSuspendedAndroid'], true);
+            return [
+              if (available) _purchase(acknowledged: acknowledged).toJson(),
+            ];
+          }
+          if (call.method == 'restorePurchases') fail('不应调用商店恢复');
+          if (call.method == 'acknowledgePurchaseAndroid') {
+            expect(coordinator.accessState.value.shouldGrantAccess, true);
+            expect(call.arguments['purchaseToken'], 'purchase-token-1');
+            ackCalls++;
+            return acknowledged = true;
+          }
+          return null;
+        },
+      );
+      addTearDown(coordinator.dispose);
+      await coordinator.init();
+      available = true;
+      switch (trigger) {
+        case 'bootstrap':
+          expect(ackCalls, 1);
+        case 'app_resumed':
+          coordinator.didChangeAppLifecycleState(AppLifecycleState.resumed);
+        case 'store_reconnected':
+          await TestDefaultBinaryMessengerBinding
+              .instance
+              .defaultBinaryMessenger
+              .handlePlatformMessage(
+                _iapChannel.name,
+                const StandardMethodCodec().encodeMethodCall(
+                  MethodCall(
+                    'purchase-error',
+                    jsonEncode({'code': ErrorCode.ServiceDisconnected.value}),
+                  ),
+                ),
+                null,
+              );
+          expect(await coordinator.loadProducts(force: true), true);
+          expect(initCalls, 2);
+      }
+      final event = await synced.future.timeout(const Duration(seconds: 2));
+      expect(event.source, trigger);
+      expect(event.silent, true);
+      expect(event.result?.success, true);
+      expect(ackCalls, 1);
+    });
+  }
+
+  test('Google 确认被拒后重新查单并自动重试一次', () async {
+    var queries = 0;
+    var attempts = 0;
+    final retried = Completer<bool>();
+    final coordinator = await _androidCoordinator(
+      actionObserver: (event) {
+        if (event.source == 'acknowledgement_retry' &&
+            event.phase == SubscriptionActionPhase.finished) {
+          retried.complete(event.result!.success);
+        }
+      },
+    );
+    _mockAndroidStore(
+      onCall: (call) async {
+        if (call.method == 'getAvailableItems') queries++;
+        if (call.method == 'acknowledgePurchaseAndroid') {
+          attempts++;
+          expect(queries, attempts);
+          expect(coordinator.accessState.value.shouldGrantAccess, true);
+          return attempts == 2;
+        }
+        return null;
+      },
+    );
+    addTearDown(coordinator.dispose);
+    await coordinator.init();
+    expect(attempts, 1);
+    expect(await retried.future.timeout(const Duration(seconds: 3)), true);
+    expect(attempts, 2);
+  });
+
+  for (final excluded in [
+    _purchase(state: PurchaseState.Pending),
+    _purchase(suspended: true),
+    _purchase(signature: 'invalid'),
+    _purchase(acknowledged: true),
+  ]) {
+    test('Google 不补确认 ${excluded.purchaseState}: '
+        'suspended=${excluded.isSuspendedAndroid}, '
+        'validSignature=${excluded.signatureAndroid != 'invalid'}, '
+        'acknowledged=${excluded.isAcknowledgedAndroid}', () async {
+      var attempts = 0;
+      _mockAndroidStore(
+        onCall: (call) async {
+          if (call.method == 'getAvailableItems') return [excluded.toJson()];
+          if (call.method == 'acknowledgePurchaseAndroid') attempts++;
+          return null;
+        },
+      );
+      final coordinator = await _androidCoordinator(plans: const []);
+      addTearDown(coordinator.dispose);
+      await coordinator.init();
+      expect(attempts, 0);
+      expect(
+        coordinator.accessState.value.shouldGrantAccess,
+        excluded.isAcknowledgedAndroid,
+      );
+    });
+  }
+
   test('grants access only for active Google Play subscriptions', () {
     final SubscriptionAccessState state =
         AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
@@ -175,6 +308,9 @@ void main() {
     var acknowledgements = 0;
     _mockAndroidStore(
       onCall: (call) async {
+        if (call.method == 'getAvailableItems') {
+          return [_purchase(acknowledged: acknowledgements > 0).toJson()];
+        }
         if (call.method == 'acknowledgePurchaseAndroid') {
           acknowledgements++;
           return true;
@@ -651,6 +787,7 @@ void main() {
 
   test('acknowledges only after local verification succeeds', () async {
     int acknowledgementCalls = 0;
+    var historyAvailable = false;
     final SubscriptionCoordinator coordinator = await _androidCoordinator();
     addTearDown(coordinator.dispose);
 
@@ -660,8 +797,9 @@ void main() {
             case 'initConnection':
               return true;
             case 'getAvailableItems':
-              return <dynamic>[_purchase().toJson()];
+              return [if (historyAvailable) _purchase().toJson()];
             case 'acknowledgePurchaseAndroid':
+              expect(coordinator.accessState.value.shouldGrantAccess, true);
               acknowledgementCalls++;
               return true;
             case 'endConnection':
@@ -674,6 +812,8 @@ void main() {
           .setMockMethodCallHandler(_iapChannel, null);
     });
 
+    await coordinator.init();
+    historyAvailable = true;
     final SubscriptionActionResult result = await coordinator.restore(
       source: 'test',
     );
@@ -732,6 +872,7 @@ void main() {
     'retries a refused Google Play acknowledgement on the next restore',
     () async {
       int acknowledgementCalls = 0;
+      var historyAvailable = false;
       final SubscriptionCoordinator coordinator = await _androidCoordinator();
       addTearDown(coordinator.dispose);
 
@@ -741,7 +882,7 @@ void main() {
               case 'initConnection':
                 return true;
               case 'getAvailableItems':
-                return <dynamic>[_purchase().toJson()];
+                return [if (historyAvailable) _purchase().toJson()];
               case 'acknowledgePurchaseAndroid':
                 acknowledgementCalls++;
                 return acknowledgementCalls > 1;
@@ -755,6 +896,8 @@ void main() {
             .setMockMethodCallHandler(_iapChannel, null);
       });
 
+      await coordinator.init();
+      historyAvailable = true;
       final SubscriptionActionResult result = await coordinator.restore(
         source: 'test',
       );
@@ -1057,7 +1200,7 @@ void main() {
 
   test('其他商品的签名无效事件不覆盖已验证的 Google Play 权益', () async {
     final synced = Completer<SubscriptionActionResult>();
-    final valid = _purchase();
+    final valid = _purchase(acknowledged: true);
     final invalid = _purchase(
       productId: 'another_subscription',
       signature: 'invalid',

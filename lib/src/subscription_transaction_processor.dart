@@ -24,7 +24,7 @@ class SubscriptionTransactionProcessor {
   final FlutterInappPurchase iap;
   final SubscriptionStoreAdapter adapter;
   final List<String>? productIds;
-  final Future<void> Function(Purchase) verifyEntitlement;
+  final Future<Purchase> Function(Purchase) verifyEntitlement;
   final bool Function() isDisposed;
   final SubscriptionLogger log;
   final SubscriptionTransactionReporter? reporter;
@@ -35,6 +35,7 @@ class SubscriptionTransactionProcessor {
     required SubscriptionActionType type,
     required String source,
     bool silent = false,
+    Future<Purchase> Function(Purchase)? preparePurchase,
   }) async {
     final productId = purchase.productId;
     SubscriptionActionResult failure(
@@ -67,10 +68,10 @@ class SubscriptionTransactionProcessor {
     try {
       await adapter.verifyPurchaseLocally(iap: iap, purchase: purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
-      await verifyEntitlement(purchase);
+      final current = await (preparePurchase ?? verifyEntitlement)(purchase);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
       // 真实购买完成与当前权益有效性分别处理；历史或延后生效购买也要完成。
-      await adapter.finishTransaction(iap: iap, purchase: purchase);
+      await adapter.finishTransaction(iap: iap, purchase: current);
       if (isDisposed()) return failure(SubscriptionFailureCode.disposed);
       // 商店交易完成后独立记录，回调不属于购买完成条件。
       unawaited(_report(purchase));

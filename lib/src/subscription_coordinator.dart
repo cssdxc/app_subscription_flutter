@@ -59,6 +59,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         ),
       };
 
+  GooglePlaySubscriptionAdapter? get _localGooglePlayAdapter =>
+      config.verifiedSubscriptionQuery == null &&
+          _storeAdapter is GooglePlaySubscriptionAdapter
+      ? _storeAdapter
+      : null;
+
   late final _transactionProcessor = SubscriptionTransactionProcessor(
     iap: _iap,
     adapter: _storeAdapter,
@@ -159,6 +165,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
   _PendingPurchaseAction? _pendingPurchaseAction;
   Timer? _accessRefreshTimer;
+  Timer? _googlePlayAcknowledgementRetry;
   bool _isIapConnected = false;
   bool _isForegroundRefreshRunning = false;
   bool _isDisposed = false;
@@ -204,6 +211,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     _listenToPurchaseEvents();
     final connected = await _ensureIapConnection(source: 'init');
     if (!connected) return;
+    if (_localGooglePlayAdapter != null) {
+      await refreshAccessState(source: 'bootstrap');
+      await loadProducts();
+      return;
+    }
     await loadProducts();
     // App Store sync 可能弹出账号登录，仅由用户主动恢复时触发。
     await refreshAccessState(source: 'bootstrap');
@@ -288,31 +300,52 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
   /// 查询识别范围内的订阅，保留每项状态；失败只回退相应商品的证据。
   Future<SubscriptionSnapshot> refreshAccessState({
     String source = 'manual_refresh',
+  }) => _refreshAccess(source: source);
+
+  Future<SubscriptionSnapshot> _refreshAccess({
+    required String source,
+    bool allowAcknowledgementRetry = true,
   }) {
     if (_isDisposed || !isConfigured) return Future.value(_accessState.value);
     return _accessFuture ??= _activity
         .track(
           SubscriptionOperation.refreshingAccess,
-          () => _refreshAccessState(source: source),
+          () => _localGooglePlayAdapter == null
+              ? _refreshAccessState(source: source)
+              : _enqueueTransaction(
+                  () => _reconcileGooglePlayPurchases(
+                    source: source,
+                    allowRetry: allowAcknowledgementRetry,
+                  ),
+                ),
         )
         .whenComplete(() => _accessFuture = null);
   }
 
   Future<SubscriptionSnapshot> _refreshAccessAfterTransaction({
     required String source,
+    bool inTransaction = true,
   }) async {
+    if (inTransaction && _localGooglePlayAdapter != null) {
+      // 本地 Play 的公开刷新也进交易队列，队列内不能等待后续刷新任务。
+      return _activity.track(
+        SubscriptionOperation.refreshingAccess,
+        () => _refreshAccessState(source: source),
+      );
+    }
     await _accessFuture;
     return refreshAccessState(source: source);
   }
 
   Future<SubscriptionSnapshot> _refreshAccessState({
     required String source,
+    Future<SubscriptionSnapshot> Function()? query,
   }) async {
     SubscriptionSnapshot fresh;
     SubscriptionSnapshot? cached;
     var completeQueryFailure = false;
     try {
-      fresh = await _queryVerifiedSnapshot();
+      fresh = await (query == null ? _queryVerifiedSnapshot() : query());
     } catch (error) {
       await _handleStoreError(error is PurchaseError ? error.code : null);
       _log('商店权益查询失败: $error');
@@ -387,6 +420,100 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     return snapshot;
   }
 
+  Future<GooglePlayPurchaseSnapshot> _queryLocalGooglePlayPurchases(
+    GooglePlaySubscriptionAdapter adapter,
+  ) async {
+    if (_subscriptionProductIds?.isEmpty == true) {
+      return (
+        access: SubscriptionSnapshot(
+          evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+        currentPurchases: const <PurchaseAndroid>[],
+      );
+    }
+    // 自定义订阅查询不负责连接，后续读取签名购买仍依赖 Billing。
+    if (config.activeSubscriptionQuery != null &&
+        !await _ensureIapConnection(source: 'query_google_play_purchases')) {
+      throw const SubscriptionStoreException(
+        failureCode: SubscriptionFailureCode.storeUnavailable,
+        message: 'The store connection is unavailable.',
+      );
+    }
+    return adapter.queryVerifiedPurchases(
+      iap: _iap,
+      subscriptions: await _queryActiveSubscriptions(_subscriptionProductIds),
+      productIds: _subscriptionProductIds,
+    );
+  }
+
+  Future<SubscriptionSnapshot> _reconcileGooglePlayPurchases({
+    required String source,
+    bool allowRetry = true,
+  }) async {
+    if (_isDisposed) return _accessState.value;
+    GooglePlayPurchaseSnapshot? play;
+    final snapshot = await _refreshAccessState(
+      source: source,
+      query: () async {
+        play = await _queryLocalGooglePlayPurchases(_localGooglePlayAdapter!);
+        return play!.access;
+      },
+    );
+    final purchases = play?.currentPurchases ?? const <PurchaseAndroid>[];
+    final handledTokens = {
+      for (final item in purchases)
+        if (item.isAcknowledgedAndroid == true) item.purchaseToken,
+    };
+    for (final item in purchases) {
+      if (_isDisposed) break;
+      if (!handledTokens.add(item.purchaseToken)) continue;
+      _notifyStarted(
+        type: SubscriptionActionType.sync,
+        source: source,
+        productId: item.productId,
+        silent: true,
+      );
+      final result = await _transactionProcessor.process(
+        item,
+        type: SubscriptionActionType.sync,
+        source: source,
+        silent: true,
+        // 权益已由同一份查询结果发布，不再查询或使用缓存判断是否确认。
+        preparePurchase: (purchase) async => purchase,
+      );
+      if (allowRetry) _retryGooglePlayAcknowledgement(result);
+      _notifyFinished(source, result);
+    }
+    return snapshot;
+  }
+
+  void _retryGooglePlayAcknowledgement(
+    SubscriptionActionResult result, {
+    bool fromPurchaseUpdate = false,
+  }) {
+    if (_isDisposed || _localGooglePlayAdapter == null) return;
+    final retryable = switch (result.failureCode) {
+      SubscriptionFailureCode.acknowledgementFailed => true,
+      SubscriptionFailureCode.subscriptionInactive ||
+      SubscriptionFailureCode.storeUnavailable ||
+      SubscriptionFailureCode.storeQueryFailed => fromPurchaseUpdate,
+      _ => fromPurchaseUpdate && result.storeErrorCode != null,
+    };
+    if (!retryable) return;
+    _googlePlayAcknowledgementRetry ??= Timer(
+      const Duration(seconds: 1),
+      () async {
+        // 批量补单尚未结束时，不能把重试合并到同一轮查询。
+        await _accessFuture;
+        _googlePlayAcknowledgementRetry = null;
+        await _refreshAccess(
+          source: 'acknowledgement_retry',
+          allowAcknowledgementRetry: false,
+        );
+      },
+    );
+  }
+
   Future<SubscriptionSnapshot> _queryVerifiedSnapshot({
     Purchase? purchase,
   }) async {
@@ -425,7 +552,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     );
   }
 
-  Future<void> _verifyPurchaseBeforeCompletion(Purchase purchase) async {
+  Future<Purchase> _verifyPurchaseBeforeCompletion(Purchase purchase) async {
     // 未注册的 Apple 交易必须带有原生订阅组，避免完成普通内购交易。
     if (purchase is PurchaseIOS &&
         !productIds.contains(purchase.productId) &&
@@ -438,18 +565,32 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     // Apple 对已验证交易 finish；Google 必须先证实对应权益，再 acknowledge。
     if (purchase is! PurchaseAndroid &&
         config.verifiedSubscriptionQuery == null)
-      return;
-    final snapshot = await _queryVerifiedSnapshot(purchase: purchase);
-    if (purchase is! PurchaseAndroid) return;
-    final ownsEntitlement = snapshot.subscriptions.any(
-      (s) =>
-          !s.fromCache &&
-          !snapshot.queryFailedProductIds.contains(s.productId) &&
-          s.shouldGrantAccess &&
-          s.purchaseTokenAndroid == purchase.purchaseToken &&
-          (s.productId == purchase.productId ||
-              s.renewal?.nextProductId == purchase.productId),
-    );
+      return purchase;
+    final adapter = _localGooglePlayAdapter;
+    final local = adapter == null
+        ? null
+        : await _queryLocalGooglePlayPurchases(adapter);
+    final snapshot =
+        local?.access ?? await _queryVerifiedSnapshot(purchase: purchase);
+    if (purchase is! PurchaseAndroid) return purchase;
+    final current = local?.currentPurchases
+        .where(
+          (item) =>
+              item.productId == purchase.productId &&
+              item.purchaseToken == purchase.purchaseToken,
+        )
+        .firstOrNull;
+    final ownsEntitlement = local != null
+        ? current != null
+        : snapshot.subscriptions.any(
+            (s) =>
+                !s.fromCache &&
+                !snapshot.queryFailedProductIds.contains(s.productId) &&
+                s.shouldGrantAccess &&
+                s.purchaseTokenAndroid == purchase.purchaseToken &&
+                (s.productId == purchase.productId ||
+                    s.renewal?.nextProductId == purchase.productId),
+          );
     if (!ownsEntitlement) {
       throw SubscriptionStoreException(
         failureCode: snapshot.queryFailedProductIds.contains(purchase.productId)
@@ -461,6 +602,8 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             'No verified entitlement is associated with this purchase token.',
       );
     }
+    if (current != null) await _updateSubscriptionAccessState(snapshot);
+    return current ?? purchase;
   }
 
   /// 根据商店商品与账户状态刷新免费试用资格。
@@ -700,6 +843,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         );
       final snapshot = await _refreshAccessAfterTransaction(
         source: 'purchase_request_returned',
+        inTransaction: false,
       );
       if (completer.isCompleted) return completer.future;
       if (_purchaseEffect(snapshot, action.plan) ==
@@ -859,6 +1003,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           source: source,
           silent: silent,
         );
+        _retryGooglePlayAcknowledgement(result);
         if (result.success) {
           if (item.id.isNotEmpty)
             restoredTransactions.add((item.storeId, item.productId, item.id));
@@ -913,6 +1058,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     if (_isDisposed) return;
     _isDisposed = true;
     _accessRefreshTimer?.cancel();
+    _googlePlayAcknowledgementRetry?.cancel();
     final pending = _pendingPurchaseAction;
     if (pending != null && !pending.completer.isCompleted) {
       pending.completer.complete(
@@ -1007,7 +1153,15 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         await _invalidateIapConnection(reason: 'disposed_during_connection');
         return false;
       }
+      final reconnected = connected && !_isIapConnected;
       _isIapConnected = connected;
+      if (reconnected &&
+          source != 'init' &&
+          _accessFuture == null &&
+          _localGooglePlayAdapter != null) {
+        // 连接也可能由交易队列内的任务发起，不能在这里等待补单。
+        unawaited(refreshAccessState(source: 'store_reconnected'));
+      }
       if (!connected) {
         _log('应用内购买连接不可用: source=$source');
       }
@@ -1157,6 +1311,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       source: matchesPendingPurchase ? pendingAction.source : 'purchase_update',
       silent: !matchesPendingPurchase,
     );
+    _retryGooglePlayAcknowledgement(result, fromPurchaseUpdate: true);
     if ((result.failureCode != SubscriptionFailureCode.unknownSku ||
             _includesSubscription(purchase.productId)) &&
         result.failureCode != SubscriptionFailureCode.purchasePending &&

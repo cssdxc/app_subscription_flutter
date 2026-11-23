@@ -8,6 +8,12 @@ import 'subscription_store_adapter.dart';
 import 'subscription_transaction.dart';
 import 'android_subscription_helper.dart';
 
+/// 同一次 Play 查询获得的权益和对应的已验签购买。
+typedef GooglePlayPurchaseSnapshot = ({
+  SubscriptionSnapshot access,
+  List<PurchaseAndroid> currentPurchases,
+});
+
 /// 负责 Google Play Billing 的购买、签名验证和权益映射。
 ///
 /// 规则依据：
@@ -163,6 +169,18 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     required List<ProductSubscription> products,
     required List<String>? productIds,
     DateTime? now,
+  }) async => (await queryVerifiedPurchases(
+    iap: iap,
+    subscriptions: subscriptions,
+    productIds: productIds,
+    now: now,
+  )).access;
+
+  Future<GooglePlayPurchaseSnapshot> queryVerifiedPurchases({
+    required FlutterInappPurchase iap,
+    required List<ActiveSubscription> subscriptions,
+    required List<String>? productIds,
+    DateTime? now,
   }) async {
     if (licenseKey.trim().isEmpty) {
       throw const SubscriptionStoreException(
@@ -175,6 +193,7 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     final List<PurchaseAndroid> purchases =
         (await iap.getAvailablePurchases(includeSuspendedAndroid: true))
             .whereType<PurchaseAndroid>()
+            .where(supportsPurchase)
             .where(
               (purchase) => productIds == null
                   ? subscriptions.any((s) => s.productId == purchase.productId)
@@ -192,31 +211,39 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
 
     // 当前插件两种令牌字段均有定义，必须同时匹配令牌和商品。
     // 两次查询间状态可能变化，购买记录已暂停或仍待付款时不能放行。
-    final List<ActiveSubscription> verifiedSubscriptions = subscriptions
-        .where((subscription) {
-          final String token =
-              subscription.purchaseTokenAndroid ??
-              subscription.purchaseToken ??
-              '';
-          return token.isNotEmpty &&
-              verifiedPurchases.any(
-                (purchase) =>
-                    purchase.purchaseToken == token &&
-                    purchase.productId == subscription.productId &&
-                    purchase.purchaseState == PurchaseState.Purchased &&
-                    purchase.isSuspendedAndroid != true,
-              );
-        })
-        .toList(growable: false);
-
+    final eligible = <(String, String), PurchaseAndroid>{};
+    for (final purchase in verifiedPurchases) {
+      final token = purchase.purchaseToken;
+      if (token == null ||
+          token.isEmpty ||
+          purchase.purchaseState != PurchaseState.Purchased ||
+          purchase.isSuspendedAndroid == true) {
+        continue;
+      }
+      final key = (purchase.productId, token);
+      if (purchase.isAcknowledgedAndroid == true ||
+          !eligible.containsKey(key)) {
+        eligible[key] = purchase;
+      }
+    }
     final nowMs = (now ?? DateTime.now()).millisecondsSinceEpoch;
-    final states = <SubscriptionAccessState>[
-      for (final subscription in verifiedSubscriptions)
-        AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
-          subscription: subscription,
-          now: now,
-        ),
-    ];
+    final currentPurchases = <PurchaseAndroid>{};
+    final states = <SubscriptionAccessState>[];
+    for (final subscription in subscriptions) {
+      final key = (
+        subscription.productId,
+        subscription.purchaseTokenAndroid ?? subscription.purchaseToken ?? '',
+      );
+      final purchase = eligible[key];
+      if (purchase == null) continue;
+      final state =
+          AndroidSubscriptionHelper.resolveAccessStateFromActiveSubscription(
+            subscription: subscription,
+            now: now,
+          );
+      states.add(state);
+      if (state.shouldGrantAccess) currentPurchases.add(purchase);
+    }
     for (final purchase in purchases) {
       if (states.any(
         (s) =>
@@ -242,7 +269,10 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
         ),
       );
     }
-    return SubscriptionSnapshot(evaluatedAtMs: nowMs, subscriptions: states);
+    return (
+      access: SubscriptionSnapshot(evaluatedAtMs: nowMs, subscriptions: states),
+      currentPurchases: currentPurchases.toList(growable: false),
+    );
   }
 
   @override
