@@ -15,20 +15,37 @@ const MethodChannel _iapChannel = MethodChannel('flutter_inapp');
 const String _purchaseData =
     '{"productId":"subscribe_month_1","purchaseToken":"purchase-token-1"}';
 const String _licenseKey =
-    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsMElJylHa4cBpux1uudt'
-    'dgmxquW30V9na8y4ubzNmiPWXfOH77MhCFO3epdWkTP/ikWYBhAUCNsdqXf7Zu'
-    'EbaJVm+4IdiyNFb4Cy0WBeZ6Ps4RPJpw4/4iDG95Erf6UnHNArLXfpAb5fSiV5G'
-    'Wh5mpIGmYlHJEZDXB3Sa1BB6xtl6EetkRfDv2UD01uYAEKd1jWm0pcetKSVHMZC'
-    '41KIjQqqRLYnAESVtRCqJ7NugpS/Y2U658Kr+bAyJRpfdsQ6hshPYpS31+Dro86S'
-    'YpMDA2KJjnys+145fevYWX9orYGBRBkmmS920DQdZeT7fyNLc6DZo442SUhuU+RC'
-    'HT7ZqwIDAQAB';
+    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0EIBiabI7LVOWHgtw0Ru'
+    'PO8F8QdOcMf6eyr06yM4yiaffPtrBoKPz2VEiaLZGoNTZ3/wSeOcQx4is7V7liTU'
+    'fE6f2NiI/cwnlTG7GZ1h2AZOBcz5zvjSfukI9epz9WMpFtOayfDzmdUAUY9nVTwK'
+    'vhkqAa4uoBZfMNd/lpfouuTVz2eH8UX26zQzD37ez9wPblssnWyB4BHIythPcSdK'
+    'cAS5NfJjOGCmBdIIif5+XI9Xh5/p4PG3EwTT5SfFMmZWR93Ow6s+kB5G7k+mP/YV'
+    'j1wUStiTqjoHWYyE2GETwcHsR/PCXKhi9HdgCaD/GR+7Zx1Y1s6NDY9u+qyeJAq0'
+    'TwIDAQAB';
 const String _purchaseSignature =
-    'R6659bU72HDrQH8dKJLs6yqr/bQzeSUuM1CQQepU64i+kTHJBcoIOjO98hoHvP2a'
-    'FhhyyeSACnwr5CZCwn15Y5wg2yK4ib2N9vEa0M8xx8+shF8pyh7Qc2b1pQSfA3g'
-    'tuX6lhLyEM/r9v4U/wXCA4QgAxqoTbgumfTnGbwvzSyeaJl5DmkMuMwkrlb83/CT'
-    'IvxiXwP+ssJ3902K+WR2Pm4q8DU0yTsnEZZXxHFtpAK9eXhnrFiqft9PG8JSPwkP'
-    'lfybA0TH10THY3lfNks5e7x4X1c4rOYDABYUtQ+LBD+gdCZRQ5YpoP8U8DBmbo1X'
-    '6ehWdUWfeEAG0qhqzwzpD6w==';
+    'oCGnixlLhaDhm3hw0si0jtEzkrGSpiwTu49nlLeRsF8xbwDZ2dZ1hKp+F1tdoLFT'
+    'HVMu+DUI1LwtmlnMf+Ln0RSJeX3jvCEmlGD4L0sLvO/2GW3pB/0CIUeusAbFxF7V'
+    'GpYO4sJJifbdllS7ThyRcIb3LXhPtHRWTrzEOAjQJnHaf9tRG3N9Od7a7LL6H+AQ'
+    'IZ2TQ0gHznqL1ZPP7ftcn0a4OtMEgHNYnOeMD4CRC2NlUB3ZaKpKadHamdS9i5TO'
+    'UMOwtkSQOVvDie6NvhjsjKWcCSf1Wa0S7LvoXP/IMvAHEjn9OKHP8t8bT6BkdaCf'
+    'xydPq72Vdzi+UF6mtc15bQ==';
+const String _targetProduct = 'subscription_target';
+const String _targetToken = 'purchase-token-2';
+const String _priorToken = 'purchase-token-3';
+const String _targetSignature =
+    'CdWDLyAmGQCFzNh6Fo3idlGlPeb8knigFiCPyqNCg4EVftSy8bCyD8FI1CNjdN5K'
+    'ay05rbIsA4y/LqsfbpxHaewCq3j1gVrRTktB6l/i1xfQyA1Q/8Mc0+YmjE9O1I+3'
+    'easEIWn+h+B1HKk1Dy6fh+96H/jJAHI5uhPthiokbqq3S1fTZM1ICHBGaTzbWhrl'
+    '1gOSIWeGEi8ta7GfhAH3h1Mh010nbLKSVyt8+ntD7RM4yxGXyEV+6mfp9vXUzuEk'
+    'K+Z9gMWiqNZ7Y8xwT2h+uVQQqW56OJ9sVGOYFueq7R6GTjZhA1u8SSEP/O7xh3s0'
+    'VT3OBzGRmn0Aa9tKlXdxRQ==';
+const String _priorSignature =
+    'mWUNkCY+DcYpxdGk1ARfqbnfOE/12yV19Pry9WLxGdlE/ZcOKfvL7fJSbrIsFx4c'
+    'l3DVp0v0li0Ie4Wc4aDjLE0p75cyLSP7c12ui6J2vHLvtu9bG6u7fFSooyiFuZfF'
+    'vFY9dD26k/CB0MHggtg/stdBQBFbfcfAuwhJXNSLZm28ZfXyv0/PgklLIfiv6Y/P'
+    'CwLQHhCMtGky9uo4Oyj8yuY1zPJuO5scs8X1TbFH/h8HxkOk5ne20zari7GyG79B'
+    '0lOmuaiNB/jWCFh3+/mCQMm/q80L8hUIlGfwDtt6GkxA7WAqd0EkXz8irHZSMz0j'
+    'Wy9kEDYa2aY1u0lfiTsEOg==';
 
 SubscriptionOffer _offer({
   required String id,
@@ -46,12 +63,15 @@ SubscriptionOffer _offer({
   );
 }
 
-ProductSubscriptionAndroid _product(List<SubscriptionOffer> offers) {
+ProductSubscriptionAndroid _product(
+  List<SubscriptionOffer> offers, {
+  String productId = 'subscribe_month_1',
+}) {
   return ProductSubscriptionAndroid(
     currency: 'USD',
     description: 'Monthly subscription',
     displayPrice: r'$9.99',
-    id: 'subscribe_month_1',
+    id: productId,
     nameAndroid: 'Monthly',
     subscriptionOffers: offers,
     title: 'Monthly',
@@ -65,6 +85,7 @@ PurchaseAndroid _purchase({
   String data = _purchaseData,
   String signature = _purchaseSignature,
   String productId = 'subscribe_month_1',
+  String token = 'purchase-token-1',
 }) {
   return PurchaseAndroid(
     dataAndroid: data,
@@ -75,7 +96,7 @@ PurchaseAndroid _purchase({
     packageNameAndroid: 'com.example.app',
     productId: productId,
     purchaseState: state,
-    purchaseToken: 'purchase-token-1',
+    purchaseToken: token,
     quantity: 1,
     signatureAndroid: signature,
     store: IapStore.Google,
@@ -85,17 +106,48 @@ PurchaseAndroid _purchase({
   );
 }
 
-ActiveSubscription _activeSubscription() {
-  return const ActiveSubscription(
+ActiveSubscription _activeSubscription({
+  String productId = 'subscribe_month_1',
+  String token = 'purchase-token-1',
+}) {
+  return ActiveSubscription(
     autoRenewingAndroid: true,
     basePlanIdAndroid: 'monthly',
     isActive: true,
-    productId: 'subscribe_month_1',
-    purchaseTokenAndroid: 'purchase-token-1',
+    productId: productId,
+    purchaseTokenAndroid: token,
     transactionDate: 1,
     transactionId: 'order-1',
   );
 }
+
+PurchaseAndroid _targetPurchase({required bool acknowledged}) => _purchase(
+  productId: _targetProduct,
+  token: _targetToken,
+  data: '{"productId":"$_targetProduct","purchaseToken":"$_targetToken"}',
+  signature: _targetSignature,
+  acknowledged: acknowledged,
+);
+
+PurchaseAndroid _priorPurchase({
+  PurchaseState state = PurchaseState.Purchased,
+}) => _purchase(
+  state: state,
+  token: _priorToken,
+  data: '{"productId":"subscribe_month_1","purchaseToken":"$_priorToken"}',
+  signature: _priorSignature,
+  acknowledged: true,
+);
+
+Future<void> _emitAndroidPurchase(PurchaseAndroid purchase) =>
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .handlePlatformMessage(
+          _iapChannel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('purchase-updated', jsonEncode(purchase.toJson())),
+          ),
+          null,
+        );
 
 Future<SubscriptionCoordinator> _androidCoordinator({
   List<SubscriptionPlan>? plans,
@@ -465,7 +517,213 @@ void main() {
     expect(record.purchaseTokenAndroid, 'purchase-token-1');
   });
 
-  for (final verification in ['verified', 'wrongToken', 'queryFailed']) {
+  for (final expected in [
+    SubscriptionActionOutcome.success,
+    SubscriptionActionOutcome.failure,
+    SubscriptionActionOutcome.unconfirmed,
+  ]) {
+    test('Google 本地购买按本次已确认的商品权益返回 $expected', () async {
+      final requested = Completer<void>();
+      var purchased = false;
+      var acknowledged = false;
+      var useOtherToken = false;
+      final acknowledgedTokens = <String>[];
+      _mockAndroidStore(
+        onCall: (call) async {
+          switch (call.method) {
+            case 'requestPurchase':
+              expect((call.arguments as Map)['purchaseToken'], isNull);
+              requested.complete();
+            case 'getAvailableItems':
+              return [
+                if (purchased)
+                  (useOtherToken
+                          ? _priorPurchase()
+                          : _purchase(acknowledged: acknowledged))
+                      .toJson(),
+              ];
+            case 'acknowledgePurchaseAndroid':
+              acknowledgedTokens.add(
+                (call.arguments as Map)['purchaseToken'] as String,
+              );
+              acknowledged = expected != SubscriptionActionOutcome.failure;
+              useOtherToken = expected == SubscriptionActionOutcome.unconfirmed;
+              return acknowledged;
+          }
+          return null;
+        },
+      );
+      final coordinator = await _androidCoordinator(
+        query: (_) async => [
+          if (purchased)
+            _activeSubscription(
+              token: useOtherToken ? _priorToken : 'purchase-token-1',
+            ),
+        ],
+      );
+      addTearDown(coordinator.dispose);
+      final buying = coordinator.purchasePlan(
+        coordinator.config.plans.single,
+        source: 'test',
+      );
+      await requested.future;
+      purchased = true;
+      await _emitAndroidPurchase(_purchase());
+      final result = await buying;
+      expect(acknowledgedTokens, ['purchase-token-1']);
+      expect(result.outcome, expected);
+      expect(result.success, expected == SubscriptionActionOutcome.success);
+      final entitlement =
+          coordinator.accessState.value.activeSubscriptions.single;
+      expect(entitlement.basePlanIdAndroid, isNull);
+      expect(
+        entitlement.purchaseTokenAndroid,
+        useOtherToken ? _priorToken : 'purchase-token-1',
+      );
+      if (expected == SubscriptionActionOutcome.success) {
+        expect(result.effect, SubscriptionPurchaseEffect.applied);
+      } else if (expected == SubscriptionActionOutcome.failure) {
+        expect(
+          result.failureCode,
+          SubscriptionFailureCode.acknowledgementFailed,
+        );
+      }
+    });
+  }
+
+  test('Google 购买请求后的旧 token 回放不会完成本次购买', () async {
+    final requested = Completer<void>();
+    final synced = Completer<SubscriptionActionResult>();
+    var current = _priorPurchase(state: PurchaseState.Pending);
+    _mockAndroidStore(
+      onCall: (call) async {
+        switch (call.method) {
+          case 'requestPurchase':
+            requested.complete();
+          case 'getAvailableItems':
+            return [current.toJson()];
+          case 'acknowledgePurchaseAndroid':
+            expect(
+              (call.arguments as Map)['purchaseToken'],
+              'purchase-token-1',
+            );
+            current = _purchase(acknowledged: true);
+            return true;
+        }
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      query: (_) async => [_activeSubscription(token: current.purchaseToken!)],
+      actionObserver: (event) {
+        if (event.source == 'purchase_update' &&
+            event.phase == SubscriptionActionPhase.finished) {
+          synced.complete(event.result);
+        }
+      },
+    );
+    addTearDown(coordinator.dispose);
+    final buying = coordinator.purchasePlan(
+      coordinator.config.plans.single,
+      source: 'test',
+    );
+    await requested.future;
+    current = _priorPurchase();
+    await _emitAndroidPurchase(current);
+    expect((await synced.future).type, SubscriptionActionType.sync);
+    current = _purchase();
+    await _emitAndroidPurchase(current);
+    expect((await buying).effect, SubscriptionPurchaseEffect.applied);
+  });
+
+  test('Google 本地跨商品立即替换验证旧购买并确认新 token', () async {
+    final requested = Completer<void>();
+    final oldPurchase = _purchase(acknowledged: true);
+    var targetActive = false;
+    var targetAcknowledged = false;
+    _mockAndroidStore(
+      onCall: (call) async {
+        switch (call.method) {
+          case 'fetchProducts':
+            return [
+              _product([
+                _offer(id: 'monthly', token: 'target-offer'),
+              ], productId: _targetProduct).toJson(),
+            ];
+          case 'getAvailableItems':
+            return [
+              (targetActive
+                      ? _targetPurchase(acknowledged: targetAcknowledged)
+                      : oldPurchase)
+                  .toJson(),
+            ];
+          case 'requestPurchase':
+            final payload = call.arguments as Map;
+            expect(payload['purchaseToken'], oldPurchase.purchaseToken);
+            expect(payload['productId'], _targetProduct);
+            expect(payload['subscriptionProductReplacementParams'], {
+              'oldProductId': oldPurchase.productId,
+              'replacementMode': 'with-time-proration',
+            });
+            requested.complete();
+          case 'acknowledgePurchaseAndroid':
+            expect((call.arguments as Map)['purchaseToken'], _targetToken);
+            targetAcknowledged = true;
+            return true;
+        }
+        return null;
+      },
+    );
+    final coordinator = await _androidCoordinator(
+      plans: const [
+        SubscriptionPlan(
+          googlePlay: GooglePlayPlan(
+            basePlanId: 'monthly',
+            productId: _targetProduct,
+          ),
+        ),
+      ],
+      query: (_) async => [
+        targetActive
+            ? _activeSubscription(
+                productId: _targetProduct,
+                token: _targetToken,
+              )
+            : _activeSubscription(),
+      ],
+    );
+    addTearDown(coordinator.dispose);
+    final buying = coordinator.purchasePlan(
+      coordinator.config.plans.single,
+      source: 'change',
+      options: SubscriptionPurchaseOptions(
+        replacementAndroid: GooglePlayReplacement(
+          purchaseToken: oldPurchase.purchaseToken!,
+          oldProductId: oldPurchase.productId,
+          mode: SubscriptionReplacementModeAndroid.WithTimeProration,
+        ),
+      ),
+    );
+    await requested.future.timeout(const Duration(seconds: 2));
+    targetActive = true;
+    await _emitAndroidPurchase(_targetPurchase(acknowledged: false));
+    final result = await buying;
+    expect(result.success, true);
+    expect(result.effect, SubscriptionPurchaseEffect.applied);
+    expect(targetAcknowledged, true);
+    final entitlement =
+        coordinator.accessState.value.activeSubscriptions.single;
+    expect(entitlement.productId, _targetProduct);
+    expect(entitlement.purchaseTokenAndroid, _targetToken);
+    expect(entitlement.basePlanIdAndroid, isNull);
+  });
+
+  for (final verification in [
+    'verified',
+    'differentBasePlan',
+    'wrongToken',
+    'queryFailed',
+  ]) {
     test('Google 新购买先验证令牌权益再确认：$verification', () async {
       final requested = Completer<void>();
       final confirmations = <GooglePlayAcknowledgementEvent>[];
@@ -500,7 +758,9 @@ void main() {
               SubscriptionAccessState(
                 store: IapStore.Google,
                 productId: 'subscribe_month_1',
-                basePlanIdAndroid: 'monthly',
+                basePlanIdAndroid: verification == 'differentBasePlan'
+                    ? 'annual'
+                    : 'monthly',
                 purchaseTokenAndroid: verification == 'wrongToken'
                     ? 'other'
                     : 'purchase-token-1',
@@ -531,6 +791,9 @@ void main() {
         expect(acknowledgements, 1);
         expect(confirmations.single.type, SubscriptionActionType.purchase);
         expect(confirmations.single.source, 'test');
+      } else if (verification == 'differentBasePlan') {
+        expect(result.outcome, SubscriptionActionOutcome.unconfirmed);
+        expect(acknowledgements, 1);
       } else {
         expect(
           result.failureCode,
@@ -588,45 +851,77 @@ void main() {
     );
   });
 
-  test('Google 套餐替换缺少权威 line item 验证时不发起购买', () async {
-    var requests = 0;
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(_iapChannel, (call) async {
+  for (final (scenario, oldProductId, oldToken, mode, expected) in [
+    (
+      '同商品',
+      'subscribe_month_1',
+      'purchase-token-1',
+      SubscriptionReplacementModeAndroid.WithTimeProration,
+      SubscriptionFailureCode.verificationRequired,
+    ),
+    (
+      '延后替换',
+      _targetProduct,
+      _targetToken,
+      SubscriptionReplacementModeAndroid.Deferred,
+      SubscriptionFailureCode.verificationRequired,
+    ),
+    (
+      '未确认旧订单',
+      _targetProduct,
+      _targetToken,
+      SubscriptionReplacementModeAndroid.ChargeFullPrice,
+      SubscriptionFailureCode.invalidReplacement,
+    ),
+    (
+      '旧 token 不匹配',
+      _targetProduct,
+      'unowned-token',
+      SubscriptionReplacementModeAndroid.ChargeFullPrice,
+      SubscriptionFailureCode.invalidReplacement,
+    ),
+  ]) {
+    test('Google 本地替换拒绝：$scenario', () async {
+      var requests = 0;
+      var oldOrderQueried = 0;
+      _mockAndroidStore(
+        onCall: (call) async {
           switch (call.method) {
-            case 'initConnection':
-            case 'endConnection':
-              return true;
-            case 'fetchProducts':
-              return [
-                _product([_offer(id: 'monthly', token: 'offer')]).toJson(),
-              ];
             case 'getAvailableItems':
-              return [_purchase().toJson()];
+              oldOrderQueried++;
+              return [
+                _targetPurchase(
+                  acknowledged:
+                      oldOrderQueried == 1 || oldToken != _targetToken,
+                ).toJson(),
+              ];
             case 'requestPurchase':
               requests++;
           }
           return null;
-        });
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(_iapChannel, null),
-    );
-    final coordinator = await _androidCoordinator();
-    addTearDown(coordinator.dispose);
-    final result = await coordinator.purchasePlan(
-      coordinator.config.plans.single,
-      source: 'change',
-      options: const SubscriptionPurchaseOptions(
-        replacementAndroid: GooglePlayReplacement(
-          purchaseToken: 'purchase-token-1',
-          oldProductId: 'subscribe_month_1',
-          mode: SubscriptionReplacementModeAndroid.Deferred,
+        },
+      );
+      final coordinator = await _androidCoordinator(
+        query: (_) async => [
+          _activeSubscription(productId: _targetProduct, token: _targetToken),
+        ],
+      );
+      addTearDown(coordinator.dispose);
+      final result = await coordinator.purchasePlan(
+        coordinator.config.plans.single,
+        source: 'change',
+        options: SubscriptionPurchaseOptions(
+          replacementAndroid: GooglePlayReplacement(
+            purchaseToken: oldToken,
+            oldProductId: oldProductId,
+            mode: mode,
+          ),
         ),
-      ),
-    );
-    expect(result.failureCode, SubscriptionFailureCode.verificationRequired);
-    expect(requests, 0);
-  });
+      );
+      expect(result.failureCode, expected);
+      expect(requests, 0);
+    });
+  }
 
   test('Google 旧购买验证等待超时后不再启动付款', () async {
     final restoring = Completer<void>();
@@ -1054,6 +1349,8 @@ void main() {
                     _offer(id: 'monthly', token: 'base-token'),
                   ]).toJson(),
                 ];
+              case 'getAvailableItems':
+                return [];
               case 'requestPurchase':
                 purchaseRequested.complete();
                 return null;
@@ -1142,6 +1439,9 @@ void main() {
                     _offer(id: 'monthly', token: 'base-token'),
                   ]).toJson(),
                 ];
+              case 'getActiveSubscriptions':
+              case 'getAvailableItems':
+                return [];
               case 'requestPurchase':
                 requestCalls++;
                 throw PlatformException(

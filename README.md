@@ -109,14 +109,14 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前版本为 `2.0.4`，使用固定 Git 标签接入：
+当前版本为 `2.0.5`，使用固定 Git 标签接入：
 
 ```yaml
 dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 2.0.4
+      ref: 2.0.5
 ```
 
 发版时递增 `pubspec.yaml` 的 `version`（`X.Y.Z`）、更新版本记录后推送到 `main`。
@@ -268,6 +268,7 @@ final result = await coordinator.purchasePlan(
 switch (result.outcome) {
   case SubscriptionActionOutcome.success:
     // effect 为 applied（当前生效）或 scheduled（已确认预约）。
+    // Google 本地 applied 确认商品权益，不承诺具体 base plan。
     // 功能门禁始终读取 accessState，不根据 success 直接放行。
     break;
   case SubscriptionActionOutcome.cancelled:
@@ -400,7 +401,9 @@ final enabledFeatures = <String>{
 };
 ```
 
-Android 按 `store/productId/basePlanIdAndroid` 映射；同一 base plan 的 offer 不改变权益身份。
+Android 纯客户端按 `store/productId` 映射权限，不同权益应使用不同商品；同一商品的 base plan
+用于选择计费方案。使用权威验证时可按实际 `basePlanIdAndroid` 进一步区分。
+同一 base plan 的 offer 不改变权益身份。
 未配置业务映射或身份未知时，宿主自行决定权限策略，插件不按价格或 SKU 名称猜等级。
 `renewal.nextProductId/nextBasePlanIdAndroid` 仅表示未来续订，不能授权目标功能。
 关闭自动续订保留当前已付费权益。
@@ -417,10 +420,11 @@ Apple 使用 StoreKit 已验证当前权益及其关联状态。`subscribed/inGr
 
 Google 本地路径验证 RSA 签名、商品与令牌，并排除 pending/suspended。
 底层 `4.0.3` 的 `getActiveSubscriptions` 会从商品目录补全 base plan，不能证明实际已购套餐，
-所以本库的本地结果将 `basePlanIdAndroid` 保留为 `null`。本地路径可提供商品维度的权益，
-但无法确认精确 base plan 的购买效果，结果可能为 `unconfirmed`。
+所以本库的本地结果将 `basePlanIdAndroid` 保留为 `null`。本地购买收到目标商品回调后，
+订单经查单、验签、确认，且本次新 token 的目标商品权益已生效，即返回 `success / applied`。
+缺少 base plan 不影响商品级成功，也不以已有订单、缓存或选择的套餐作为本次购买成功的证据。
 
-需要准确套餐身份、账号统一权益或 Android 替换时，配置 `verifiedSubscriptionQuery`。
+需要准确套餐身份、账号统一权益、同商品替换或延后替换时，配置 `verifiedSubscriptionQuery`。
 配置后它是权益快照的唯一查询来源，失败不会静默改用设备查询：
 
 ```dart
@@ -452,14 +456,16 @@ final result = await coordinator.purchasePlan(
     replacementAndroid: GooglePlayReplacement(
       purchaseToken: current.purchaseTokenAndroid!,
       oldProductId: current.productId,
-      mode: SubscriptionReplacementModeAndroid.Deferred,
+    mode: SubscriptionReplacementModeAndroid.WithTimeProration,
     ),
   ),
 );
 ```
 
-此选项仅用于 Google Play，必须配置权威验证回调，否则返回 `verificationRequired`。
-库核对当前持有的旧购买并验证签名，传递旧 token、旧商品和替换方式，不声明升降级方向。
+此选项仅用于 Google Play。纯客户端只支持跨 `productId` 的立即替换：旧订阅必须经本地
+查单验签、当前有效且已确认；同商品或 `Deferred` 替换需要权威验证，否则返回
+`verificationRequired`。到期后重新购买直接走普通购买，不传替换参数。
+库传递旧 token、旧商品和替换方式，不声明升降级方向。
 策略支持范围由 Google 决定；`WithoutProration` 会立即切换权益，不能当作 `Deferred`。
 延后替换的新购买也需要及时确认，回调应将新 token 关联到仍有效的当前明细及已证实的未来目标，
 不能提前开放未来功能。Google 仅在对应 token 有新鲜有效权益后 acknowledge；失败返回

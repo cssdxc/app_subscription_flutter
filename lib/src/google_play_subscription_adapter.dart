@@ -11,10 +11,11 @@ import 'subscription_store_adapter.dart';
 import 'subscription_transaction.dart';
 import 'android_subscription_helper.dart';
 
-/// 同一次 Play 查询获得的权益和对应的已验签购买。
+/// 同一次 Play 查询获得的权益、对应的已验签购买和已存在的订单令牌。
 typedef GooglePlayPurchaseSnapshot = ({
   SubscriptionSnapshot access,
   List<PurchaseAndroid> currentPurchases,
+  Set<String> knownPurchaseTokens,
 });
 
 /// 负责 Google Play Billing 的购买、签名验证和权益映射。
@@ -242,16 +243,16 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     }
 
     // 查询时包含 suspended 购买，确保账单问题不会被误判为无购买记录。
-    final List<PurchaseAndroid> purchases =
+    final availablePurchases =
         (await iap.getAvailablePurchases(includeSuspendedAndroid: true))
             .whereType<PurchaseAndroid>()
             .where(supportsPurchase)
-            .where(
-              (purchase) => productIds == null
-                  ? subscriptions.any((s) => s.productId == purchase.productId)
-                  : productIds.contains(purchase.productId),
-            )
             .toList(growable: false);
+    final purchases = availablePurchases.where(
+      (purchase) => productIds == null
+          ? subscriptions.any((s) => s.productId == purchase.productId)
+          : productIds.contains(purchase.productId),
+    );
     final List<PurchaseAndroid> verifiedPurchases = purchases
         .where(
           (purchase) => AndroidSubscriptionHelper.verifyPurchaseSignature(
@@ -324,6 +325,12 @@ class GooglePlaySubscriptionAdapter implements SubscriptionStoreAdapter {
     return (
       access: SubscriptionSnapshot(evaluatedAtMs: nowMs, subscriptions: states),
       currentPurchases: currentPurchases.toList(growable: false),
+      // 也排除先前已存在的待付款订单；这组令牌不用于授权。
+      knownPurchaseTokens: {
+        for (final purchase in availablePurchases)
+          if (purchase.purchaseToken case final token? when token.isNotEmpty)
+            token,
+      },
     );
   }
 

@@ -430,6 +430,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           evaluatedAtMs: DateTime.now().millisecondsSinceEpoch,
         ),
         currentPurchases: const <PurchaseAndroid>[],
+        knownPurchaseTokens: const <String>{},
       );
     }
     // 自定义订阅查询不负责连接，后续读取签名购买仍依赖 Billing。
@@ -818,7 +819,16 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     );
     final action = _pendingPurchaseAction!;
     Future<SubscriptionActionResult> request() async {
-      await _validateReplacement(options.replacementAndroid);
+      if (_localGooglePlayAdapter case final adapter?) {
+        action.googlePlayTokensBeforeRequest =
+            await _prepareLocalGooglePurchase(
+              adapter: adapter,
+              targetProductId: product.id,
+              replacement: options.replacementAndroid,
+            );
+      } else {
+        await _validateReplacement(options.replacementAndroid);
+      }
       // 等待旧购买验证时可能已超时或释放，不能随后再启动付款。
       if (!identical(_pendingPurchaseAction, action) || _isDisposed) {
         return SubscriptionActionResult(
@@ -876,9 +886,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 
   SubscriptionPurchaseEffect? _purchaseEffect(
     SubscriptionSnapshot snapshot,
-    SubscriptionPlan plan,
-  ) {
+    SubscriptionPlan plan, {
+    Purchase? purchase,
+  }) {
     final productId = plan.productIdFor(store);
+    final localGooglePlay = _localGooglePlayAdapter != null;
     final records = snapshot.subscriptions.where(
       (s) =>
           !s.fromCache && !snapshot.queryFailedProductIds.contains(s.productId),
@@ -888,25 +900,75 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
           s.shouldGrantAccess &&
           s.productId == productId &&
           (store != IapStore.Google ||
-              s.basePlanIdAndroid == plan.googlePlay?.basePlanId),
+              (localGooglePlay
+                  ? purchase is PurchaseAndroid &&
+                        s.purchaseTokenAndroid == purchase.purchaseToken
+                  : s.basePlanIdAndroid == plan.googlePlay?.basePlanId)),
     )) {
       return SubscriptionPurchaseEffect.applied;
     }
-    if (records.any(
-      (s) =>
-          s.shouldGrantAccess &&
-          s.renewal?.autoRenewEnabled == true &&
-          s.renewal?.nextProductId == productId &&
-          (store != IapStore.Google ||
-              s.renewal?.nextBasePlanIdAndroid ==
-                  plan.googlePlay?.basePlanId) &&
-          (s.productId != productId ||
-              store == IapStore.Google &&
-                  s.basePlanIdAndroid != plan.googlePlay?.basePlanId),
-    )) {
+    if (!localGooglePlay &&
+        records.any(
+          (s) =>
+              s.shouldGrantAccess &&
+              s.renewal?.autoRenewEnabled == true &&
+              s.renewal?.nextProductId == productId &&
+              (store != IapStore.Google ||
+                  s.renewal?.nextBasePlanIdAndroid ==
+                      plan.googlePlay?.basePlanId) &&
+              (s.productId != productId ||
+                  store == IapStore.Google &&
+                      s.basePlanIdAndroid != plan.googlePlay?.basePlanId),
+        )) {
       return SubscriptionPurchaseEffect.scheduled;
     }
     return null;
+  }
+
+  Future<Set<String>> _prepareLocalGooglePurchase({
+    required GooglePlaySubscriptionAdapter adapter,
+    required String targetProductId,
+    required GooglePlayReplacement? replacement,
+  }) async {
+    if (replacement != null) {
+      if (replacement.oldProductId == targetProductId ||
+          replacement.mode == SubscriptionReplacementModeAndroid.Deferred) {
+        throw const SubscriptionStoreException(
+          failureCode: SubscriptionFailureCode.verificationRequired,
+          message:
+              'Same-product or deferred replacements require server verification.',
+        );
+      }
+      final isImmediate = switch (replacement.mode) {
+        SubscriptionReplacementModeAndroid.WithTimeProration ||
+        SubscriptionReplacementModeAndroid.ChargeProratedPrice ||
+        SubscriptionReplacementModeAndroid.ChargeFullPrice ||
+        SubscriptionReplacementModeAndroid.WithoutProration => true,
+        _ => false,
+      };
+      if (!isImmediate) {
+        throw const SubscriptionStoreException(
+          failureCode: SubscriptionFailureCode.invalidReplacement,
+          message:
+              'The replacement mode does not support local immediate replacement.',
+        );
+      }
+    }
+
+    final play = await _queryLocalGooglePlayPurchases(adapter);
+    if (replacement != null &&
+        !play.currentPurchases.any(
+          (p) =>
+              p.productId == replacement.oldProductId &&
+              p.purchaseToken == replacement.purchaseToken &&
+              p.isAcknowledgedAndroid == true,
+        )) {
+      throw const SubscriptionStoreException(
+        failureCode: SubscriptionFailureCode.invalidReplacement,
+        message: 'The purchase to replace must be current and acknowledged.',
+      );
+    }
+    return play.knownPurchaseTokens;
   }
 
   Future<void> _validateReplacement(GooglePlayReplacement? replacement) async {
@@ -1221,7 +1283,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       purchase,
     ) {
       if (_isDisposed) return;
-      final pendingAction = _pendingPurchaseAction;
+      final action = _pendingPurchaseAction;
+      final pendingAction =
+          _localGooglePlayAdapter != null &&
+              action?.googlePlayTokensBeforeRequest == null
+          ? null
+          : action;
       final restoredTransactions = _restoringTransactions;
       unawaited(
         _enqueueTransaction(() async {
@@ -1250,6 +1317,12 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
       final String errorCode = event.code?.value ?? '';
       _log('购买错误: code=$errorCode, message=${event.message}');
       final _PendingPurchaseAction? pendingAction = _pendingPurchaseAction;
+      if (pendingAction != null &&
+          _localGooglePlayAdapter != null &&
+          pendingAction.googlePlayTokensBeforeRequest == null) {
+        unawaited(_handleStoreError(event.code));
+        return;
+      }
       final String errorProductId = event.productId ?? '';
       final List<String> errorProductIds = event.productIds ?? const <String>[];
       final bool identifiesAnotherProduct =
@@ -1294,7 +1367,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     final matchesPendingPurchase =
         pendingAction != null &&
         identical(pendingAction, _pendingPurchaseAction) &&
-        pendingAction.productId == purchase.productId;
+        pendingAction.productId == purchase.productId &&
+        pendingAction.googlePlayTokensBeforeRequest?.contains(
+              purchase.purchaseToken,
+            ) !=
+            true;
     final SubscriptionActionType actionType = matchesPendingPurchase
         ? SubscriptionActionType.purchase
         : SubscriptionActionType.sync;
@@ -1321,7 +1398,11 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
         source: 'purchase_update',
       );
       if (matchesPendingPurchase && result.success) {
-        final effect = _purchaseEffect(snapshot, pendingAction.plan);
+        final effect = _purchaseEffect(
+          snapshot,
+          pendingAction.plan,
+          purchase: purchase,
+        );
         result = effect != null
             ? SubscriptionActionResult.success(
                 type: SubscriptionActionType.purchase,
@@ -1451,7 +1532,7 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
 }
 
 class _PendingPurchaseAction {
-  const _PendingPurchaseAction({
+  _PendingPurchaseAction({
     required this.productId,
     required this.source,
     required this.completer,
@@ -1462,4 +1543,7 @@ class _PendingPurchaseAction {
   final String source;
   final Completer<SubscriptionActionResult> completer;
   final SubscriptionPlan plan;
+
+  // 本地 Play 请求发出前已有的 token；null 表示未完成本地查单。
+  Set<String>? googlePlayTokensBeforeRequest;
 }

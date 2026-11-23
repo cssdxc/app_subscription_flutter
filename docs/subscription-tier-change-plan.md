@@ -1,6 +1,6 @@
 # 订阅变更实现与迁移
 
-日期：2026-11-09。发布版本为 `2.0.2`。
+基础接口发布于 `2.0.2`；本文包含当前版本的本地 Google Play 规则。
 代码和模拟通道测试已实现；真实商店验收需在宿主工程执行。
 
 ## 通用契约
@@ -34,7 +34,8 @@ SubscriptionSnapshot
 顶层 `shouldGrantAccess` 仅表示存在有效订阅。续订目标、付款待批准、用户当前选择的套餐
 都不增加当前权益；关闭续订也不立即移除当前权益。未知身份保持 `null`。
 
-宿主应集中维护商品身份到功能的映射；Android 同时匹配 product/base plan，offer 不作为权益身份。
+宿主应集中维护商品身份到功能的映射；Android 本地以 `productId` 区分权限，
+权威验证可进一步使用实际的 base plan，offer 不作为权益身份。
 例如 `am_year_1` 开通录制，`am_year_2` 开通录制和导航，这份配置只存在于 App 权限服务。
 插件不要求所有 App 都有基础/高级两档，也不要求功能按等级继承。
 
@@ -56,7 +57,7 @@ Google 通过原生 SUBS 查询识别订阅，再关联签名购买。普通内�
 
 | outcome / effect | 含义 | 宿主处理 |
 | --- | --- | --- |
-| `success / applied` | 已完成交易且验证目标身份当前有效 | 按当前快照开放功能 |
+| `success / applied` | 已完成交易且验证目标身份当前有效；Google 本地确认本次新 token 的目标商品，不确认 base plan | 按当前快照开放功能 |
 | `success / scheduled` | 商店已确认未来切换 | 保留当前商品功能，显示预约信息 |
 | `pending` | 付款或外部批准未完成 | 等待事件，不开放新功能 |
 | `unconfirmed` | 等待结束，证据仍不足 | 可主动刷新；不能据此自动重试付款 |
@@ -90,7 +91,7 @@ SubscriptionPurchaseOptions(
   replacementAndroid: GooglePlayReplacement(
     purchaseToken: current.purchaseTokenAndroid!,
     oldProductId: current.productId,
-    mode: SubscriptionReplacementModeAndroid.Deferred,
+    mode: SubscriptionReplacementModeAndroid.WithTimeProration,
   ),
 )
 ```
@@ -100,9 +101,9 @@ SubscriptionPurchaseOptions(
 各 mode 的可用范围及费用由 Google Play 检查，库不自动替换模式或退化为新购。
 
 底层本地订阅查询会根据商品目录补全 base plan，不能证明实际购买身份，因此本地路径保留未知值。
-普通购买可以获得商品维度的有效状态，但缺少精确 base plan 时不能确认 `applied`。
-显式替换必须配置 `verifiedSubscriptionQuery`，否则返回 `verificationRequired`（2026）。
-旧购买不匹配等替换参数错误返回 `invalidReplacement`（2025）。
+普通购买与跨商品立即替换均在本次新 token 的目标商品已验签、已确认并有效时，返回商品级 `applied`。
+本地替换要求旧订单当前有效且已确认；旧购买不匹配等参数错误返回 `invalidReplacement`（2025）。
+同商品或延后替换需配置 `verifiedSubscriptionQuery`，否则返回 `verificationRequired`（2026）。
 
 ## 服务端回调契约
 
@@ -133,7 +134,8 @@ Google 本地签名验证仍保留；acknowledge 前必须有相同 token 的新
    `refreshAccessState()` 返回值同样更新。
 2. 从 `snapshot.activeSubscriptions` 读取有效商品并映射业务功能。顶层不再有单一的 status/productId/reason。
 3. 购买结果 switch 增加 `unconfirmed`；success 读取 `effect`，不能一律提示新权益已开通或直接关闭业务门禁。
-4. Android 有多个 base plan 或需要替换时接入权威验证回调，并从已验证记录取得旧 token。
+4. Android 如需查明实际 base plan、同商品或延后替换，接入权威验证回调。
+   替换使用已验证旧记录的 token，普通新购不传旧 token。
 5. 自定义 adapter 的 `resolveVerifiedAccessState` 返回完整快照，移除全局 `fallbackProductId` 参数；
    `productIds` 改为可空，`null` 表示本 App 全部订阅，空列表不授权。服务端回调同样遵守这个范围。
 6. 从 `plans` 移除只为识别历史权益而添加的套餐；默认全量查询仍识别历史商品。
@@ -142,7 +144,7 @@ Google 本地签名验证仍保留；acknowledge 前必须有相同 token 的新
    每条记录受六小时期限和已知权益截止限制，部分刷新不延长其他记录证据时间。
 
 `speedometer_flt` 当前固定 Git 依赖 `1.0.6`；本轮未修改宿主，需另行迁移并升级依赖。
-插件使用 `2.0.2` Git 标签接入，包含公共接口变更，宿主升级前需完成上述迁移。
+从 `2.0.1` 及以前升级前需完成上述迁移；当前接入版本以 README 为准。
 
 ## 发布前商店验收
 

@@ -474,6 +474,9 @@ void main() {
               fetchCalls++;
               skus = (call.arguments as Map)['skus'] as List;
               return [product.toJson()];
+            case 'getActiveSubscriptions':
+            case 'getAvailableItems':
+              return [];
             case 'requestPurchase':
               payload = call.arguments;
               requested.complete();
