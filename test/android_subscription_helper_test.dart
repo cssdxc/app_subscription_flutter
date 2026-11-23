@@ -219,11 +219,13 @@ void main() {
   setUp(FlutterInappPurchase.resetSharedStateForTesting);
 
   for (final trigger in ['bootstrap', 'app_resumed', 'store_reconnected']) {
-    test('Google 在 $trigger 静默交付当前权益后补确认', () async {
+    test('Google 在 $trigger 静默补确认后发布当前权益', () async {
       var available = trigger == 'bootstrap';
       var acknowledged = false;
       var ackCalls = 0;
       var initCalls = 0;
+      final acknowledgementStarted = Completer<void>();
+      final releaseAcknowledgement = Completer<void>();
       final synced = Completer<SubscriptionActionEvent>();
       final confirmations = <GooglePlayAcknowledgementEvent>[];
       final coordinator = await _androidCoordinator(
@@ -251,9 +253,10 @@ void main() {
           }
           if (call.method == 'restorePurchases') fail('不应调用商店恢复');
           if (call.method == 'acknowledgePurchaseAndroid') {
-            expect(coordinator.accessState.value.shouldGrantAccess, true);
             expect(call.arguments['purchaseToken'], 'purchase-token-1');
             ackCalls++;
+            acknowledgementStarted.complete();
+            await releaseAcknowledgement.future;
             acknowledged = true;
             return '{"responseCode":0}';
           }
@@ -261,31 +264,39 @@ void main() {
         },
       );
       addTearDown(coordinator.dispose);
-      await coordinator.init();
-      available = true;
-      switch (trigger) {
-        case 'bootstrap':
-          expect(ackCalls, 1);
-        case 'app_resumed':
-          coordinator.didChangeAppLifecycleState(AppLifecycleState.resumed);
-        case 'store_reconnected':
-          await TestDefaultBinaryMessengerBinding
-              .instance
-              .defaultBinaryMessenger
-              .handlePlatformMessage(
-                _iapChannel.name,
-                const StandardMethodCodec().encodeMethodCall(
-                  MethodCall(
-                    'purchase-error',
-                    jsonEncode({'code': ErrorCode.ServiceDisconnected.value}),
+      final initializing = coordinator.init();
+      try {
+        if (trigger != 'bootstrap') await initializing;
+        available = true;
+        switch (trigger) {
+          case 'app_resumed':
+            coordinator.didChangeAppLifecycleState(AppLifecycleState.resumed);
+          case 'store_reconnected':
+            await TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger
+                .handlePlatformMessage(
+                  _iapChannel.name,
+                  const StandardMethodCodec().encodeMethodCall(
+                    MethodCall(
+                      'purchase-error',
+                      jsonEncode({'code': ErrorCode.ServiceDisconnected.value}),
+                    ),
                   ),
-                ),
-                null,
-              );
-          expect(await coordinator.loadProducts(force: true), true);
-          expect(initCalls, 2);
+                  null,
+                );
+            expect(await coordinator.loadProducts(force: true), true);
+            expect(initCalls, 2);
+        }
+        await acknowledgementStarted.future.timeout(const Duration(seconds: 2));
+        expect(coordinator.accessState.value.shouldGrantAccess, false);
+        expect(confirmations, isEmpty);
+      } finally {
+        releaseAcknowledgement.complete();
       }
+      await initializing;
       final event = await synced.future.timeout(const Duration(seconds: 2));
+      expect(coordinator.accessState.value.shouldGrantAccess, true);
       expect(event.source, trigger);
       expect(event.silent, true);
       expect(event.result?.success, true);
@@ -320,7 +331,7 @@ void main() {
         if (call.method == 'acknowledgePurchaseAndroid') {
           attempts++;
           expect(queries, attempts);
-          expect(coordinator.accessState.value.shouldGrantAccess, true);
+          expect(coordinator.accessState.value.shouldGrantAccess, attempts > 1);
           if (attempts == 1) {
             throw PlatformException(
               code: 'service-error',
@@ -336,6 +347,7 @@ void main() {
     addTearDown(coordinator.dispose);
     await coordinator.init();
     expect(attempts, 1);
+    expect(coordinator.accessState.value.shouldGrantAccess, true);
     final rejected = confirmations.single;
     expect(rejected.success, false);
     expect(rejected.source, 'bootstrap');
@@ -524,6 +536,8 @@ void main() {
   ]) {
     test('Google 本地购买按本次已确认的商品权益返回 $expected', () async {
       final requested = Completer<void>();
+      final acknowledgementStarted = Completer<void>();
+      final releaseAcknowledgement = Completer<void>();
       var purchased = false;
       var acknowledged = false;
       var useOtherToken = false;
@@ -546,6 +560,8 @@ void main() {
               acknowledgedTokens.add(
                 (call.arguments as Map)['purchaseToken'] as String,
               );
+              acknowledgementStarted.complete();
+              await releaseAcknowledgement.future;
               acknowledged = expected != SubscriptionActionOutcome.failure;
               useOtherToken = expected == SubscriptionActionOutcome.unconfirmed;
               return acknowledged;
@@ -569,6 +585,12 @@ void main() {
       await requested.future;
       purchased = true;
       await _emitAndroidPurchase(_purchase());
+      try {
+        await acknowledgementStarted.future.timeout(const Duration(seconds: 2));
+        expect(coordinator.accessState.value.shouldGrantAccess, false);
+      } finally {
+        releaseAcknowledgement.complete();
+      }
       final result = await buying;
       expect(acknowledgedTokens, ['purchase-token-1']);
       expect(result.outcome, expected);
@@ -638,6 +660,8 @@ void main() {
 
   test('Google 本地跨商品立即替换验证旧购买并确认新 token', () async {
     final requested = Completer<void>();
+    final acknowledgementStarted = Completer<void>();
+    final releaseAcknowledgement = Completer<void>();
     final oldPurchase = _purchase(acknowledged: true);
     var targetActive = false;
     var targetAcknowledged = false;
@@ -668,6 +692,8 @@ void main() {
             requested.complete();
           case 'acknowledgePurchaseAndroid':
             expect((call.arguments as Map)['purchaseToken'], _targetToken);
+            acknowledgementStarted.complete();
+            await releaseAcknowledgement.future;
             targetAcknowledged = true;
             return true;
         }
@@ -693,6 +719,7 @@ void main() {
       ],
     );
     addTearDown(coordinator.dispose);
+    await coordinator.init();
     final buying = coordinator.purchasePlan(
       coordinator.config.plans.single,
       source: 'change',
@@ -707,6 +734,15 @@ void main() {
     await requested.future.timeout(const Duration(seconds: 2));
     targetActive = true;
     await _emitAndroidPurchase(_targetPurchase(acknowledged: false));
+    try {
+      await acknowledgementStarted.future.timeout(const Duration(seconds: 2));
+      expect(
+        coordinator.accessState.value.activeSubscriptions.single.productId,
+        oldPurchase.productId,
+      );
+    } finally {
+      releaseAcknowledgement.complete();
+    }
     final result = await buying;
     expect(result.success, true);
     expect(result.effect, SubscriptionPurchaseEffect.applied);
@@ -1151,6 +1187,8 @@ void main() {
   test('acknowledges only after local verification succeeds', () async {
     int acknowledgementCalls = 0;
     var historyAvailable = false;
+    final acknowledgementStarted = Completer<void>();
+    final releaseAcknowledgement = Completer<void>();
     final SubscriptionCoordinator coordinator = await _androidCoordinator();
     addTearDown(coordinator.dispose);
 
@@ -1162,8 +1200,9 @@ void main() {
             case 'getAvailableItems':
               return [if (historyAvailable) _purchase().toJson()];
             case 'acknowledgePurchaseAndroid':
-              expect(coordinator.accessState.value.shouldGrantAccess, true);
               acknowledgementCalls++;
+              acknowledgementStarted.complete();
+              await releaseAcknowledgement.future;
               return true;
             case 'endConnection':
               return true;
@@ -1177,12 +1216,17 @@ void main() {
 
     await coordinator.init();
     historyAvailable = true;
-    final SubscriptionActionResult result = await coordinator.restore(
-      source: 'test',
-    );
-
+    final restoring = coordinator.restore(source: 'test');
+    try {
+      await acknowledgementStarted.future.timeout(const Duration(seconds: 2));
+      expect(coordinator.accessState.value.shouldGrantAccess, false);
+    } finally {
+      releaseAcknowledgement.complete();
+    }
+    final result = await restoring;
     expect(result.success, isTrue);
     expect(acknowledgementCalls, 1);
+    expect(coordinator.accessState.value.shouldGrantAccess, true);
   });
 
   test(

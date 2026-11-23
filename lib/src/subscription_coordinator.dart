@@ -453,37 +453,42 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
     bool allowRetry = true,
   }) async {
     if (_isDisposed) return _accessState.value;
-    GooglePlayPurchaseSnapshot? play;
+    final results = <SubscriptionActionResult>[];
     final snapshot = await _refreshAccessState(
       source: source,
       query: () async {
-        play = await _queryLocalGooglePlayPurchases(_localGooglePlayAdapter!);
-        return play!.access;
+        final play = await _queryLocalGooglePlayPurchases(
+          _localGooglePlayAdapter!,
+        );
+        final purchases = play.currentPurchases;
+        final handledTokens = {
+          for (final item in purchases)
+            if (item.isAcknowledgedAndroid == true) item.purchaseToken,
+        };
+        for (final item in purchases) {
+          if (_isDisposed) break;
+          if (!handledTokens.add(item.purchaseToken)) continue;
+          _notifyStarted(
+            type: SubscriptionActionType.sync,
+            source: source,
+            productId: item.productId,
+            silent: true,
+          );
+          final result = await _transactionProcessor.process(
+            item,
+            type: SubscriptionActionType.sync,
+            source: source,
+            silent: true,
+            // 以同一份尚未发布的查询结果为确认依据，不使用缓存。
+            preparePurchase: (purchase) async => purchase,
+          );
+          if (allowRetry) _retryGooglePlayAcknowledgement(result);
+          results.add(result);
+        }
+        return play.access;
       },
     );
-    final purchases = play?.currentPurchases ?? const <PurchaseAndroid>[];
-    final handledTokens = {
-      for (final item in purchases)
-        if (item.isAcknowledgedAndroid == true) item.purchaseToken,
-    };
-    for (final item in purchases) {
-      if (_isDisposed) break;
-      if (!handledTokens.add(item.purchaseToken)) continue;
-      _notifyStarted(
-        type: SubscriptionActionType.sync,
-        source: source,
-        productId: item.productId,
-        silent: true,
-      );
-      final result = await _transactionProcessor.process(
-        item,
-        type: SubscriptionActionType.sync,
-        source: source,
-        silent: true,
-        // 权益已由同一份查询结果发布，不再查询或使用缓存判断是否确认。
-        preparePurchase: (purchase) async => purchase,
-      );
-      if (allowRetry) _retryGooglePlayAcknowledgement(result);
+    for (final result in results) {
       _notifyFinished(source, result);
     }
     return snapshot;
@@ -604,7 +609,6 @@ class SubscriptionCoordinator with WidgetsBindingObserver {
             'No verified entitlement is associated with this purchase token.',
       );
     }
-    if (current != null) await _updateSubscriptionAccessState(snapshot);
     return current ?? purchase;
   }
 

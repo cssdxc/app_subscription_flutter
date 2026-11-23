@@ -109,14 +109,14 @@ user choice billing 修复；本项目主要受商店选择规则影响。
 接入方配置套餐并直接持有协调器。包内不包含产品专属的 SKU、套餐业务枚举、
 文案、路由、埋点、提醒策略或 UI 组件。
 
-当前版本为 `2.0.5`，使用固定 Git 标签接入：
+当前版本为 `2.0.6`，使用固定 Git 标签接入：
 
 ```yaml
 dependencies:
   app_subscription_core:
     git:
       url: https://github.com/cssdxc/app_subscription_flutter.git
-      ref: 2.0.5
+      ref: 2.0.6
 ```
 
 发版时递增 `pubspec.yaml` 的 `version`（`X.Y.Z`）、更新版本记录后推送到 `main`。
@@ -472,7 +472,9 @@ final result = await coordinator.purchasePlan(
 `acknowledgementFailed`，后续恢复可重试。
 
 使用本地验证时，Play 的购买回调和补确认都以同商品、同 token 的已验签当前订单为准。
-先更新本地权益，再确认；失败会重新查单并延迟重试一次，不重新购买，也不靠缓存确认。
+与 Apple 一样，购买和手动恢复先处理交易，再刷新并发布权益。自动补确认也会等本轮确认结束后，
+才发布已验证的快照。确认失败不等于订阅无效，权益仍按商店证据独立发布，但不会将失败的购买
+标记为成功；后续会重新查单并延迟重试一次，不重新购买，也不靠缓存确认。
 客户端不能在应用未运行时补确认；需要覆盖这种情况时，应由服务端验证并确认订单。
 
 需要埋点时，可在 `SubscriptionCoordinatorConfig` 设置
